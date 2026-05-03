@@ -1,0 +1,11 @@
+{
+  "active_port": 3000,
+  "health_endpoint": "/health",
+  "server_status": "running",
+  "connection_status": "connected",
+  "port_attempts": [
+    3000
+  ],
+  "selected_port": 3000,
+  "startup_errors": []
+}

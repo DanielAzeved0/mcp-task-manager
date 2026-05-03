@@ -1,0 +1,55 @@
+{
+  "name": "task-manager",
+  "version": "1.0.0",
+  "type": "mcp",
+  "language": "typescript",
+  "description": "Interactive task management MCP server with widgets",
+  "author": {
+    "name": "Daniel Azevedo",
+    "email": "daniel.azevedo@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/mcp-task-manager"
+  },
+  "keywords": ["mcp", "task-manager", "productivity", "widgets"],
+  "tools": [
+    {
+      "name": "create_task",
+      "description": "Create a new task"
+    },
+    {
+      "name": "list_tasks",
+      "description": "List tasks with interactive widget"
+    },
+    {
+      "name": "update_task",
+      "description": "Update an existing task"
+    },
+    {
+      "name": "delete_task",
+      "description": "Delete a task"
+    },
+    {
+      "name": "get_statistics",
+      "description": "Get task statistics"
+    }
+  ],
+  "widgets": [
+    {
+      "id": "task-widget",
+      "name": "Task List",
+      "description": "Interactive task list with filters and priorities"
+    },
+    {
+      "id": "statistics-widget",
+      "name": "Statistics",
+      "description": "Task statistics and completion metrics"
+    },
+    {
+      "id": "prompt-widget",
+      "name": "Prompt Generator",
+      "description": "Convert natural language prompts to structured Prompt Specifications"
+    }
+  ]
+}

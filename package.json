@@ -1,0 +1,36 @@
+{
+  "name": "mcp-task-manager",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "backend": "tsx watch src/index.ts",
+    "frontend_static": "serve public -l 5173",
+    "frontend": "npm run frontend_static",
+    "fullstack": "concurrently \"npm run backend\" \"npm run frontend_static\"",
+    "dev": "npm run fullstack",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "mcp-use": "^1.26.0",
+    "ollama": "^0.3.0",
+    "openai": "^4.104.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.17",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.3.28",
+    "@types/react-dom": "^18.3.7",
+    "concurrently": "^9.2.1",
+    "serve": "^14.2.6",
+    "tsx": "^4.7.0",
+    "typescript": "^5.0.0"
+  }
+}

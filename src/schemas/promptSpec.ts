@@ -1,0 +1,121 @@
+import { z } from "zod";
+
+export const promptRequestSchema = z.object({
+  prompt: z.string().trim().min(1, "prompt is required"),
+  context: z.string().optional(),
+  strict_mode: z.boolean().optional(),
+  min_quality_score: z.number().min(0).max(10).optional(),
+  use_cache: z.boolean().optional(),
+  preferred_backend: z.enum(["ollama", "openai", "auto"]).optional(),
+  strict_json: z.boolean().optional(),
+  feedback_score: z.number().min(0).max(10).optional(),
+  user_id: z.string().trim().min(1, "user_id is required"),
+  team_id: z.string().optional(),
+});
+
+export const promptSpecSchema = z.object({
+  task_instruction: z.string().trim().min(1),
+  input_fields: z.record(z.string(), z.object({
+    type: z.string(),
+    description: z.string()
+  })),
+  output_fields: z.record(z.string(), z.object({
+    type: z.string(),
+    description: z.string()
+  })),
+  metadata: z.object({
+    normalized_at: z.string(),
+    original_field_count: z.object({
+      input: z.number(),
+      output: z.number()
+    }),
+    field_name_changes: z.record(z.string(), z.string())
+  })
+});
+
+export const promptValidationSchema = z.object({
+  is_valid: z.boolean(),
+  issues: z.array(z.string()),
+  fixes_applied: z.array(z.string()),
+});
+
+export const promptPerformanceSchema = z.object({
+  execution_time_ms: z.number().min(0),
+  tokens_used: z.number().min(0),
+  model_used: z.string(),
+});
+
+export const promptCacheSchema = z.object({
+  hit: z.boolean(),
+  cache_key: z.string(),
+});
+
+export const promptVersioningSchema = z.object({
+  version_id: z.string(),
+  previous_version_id: z.string().nullable(),
+  created_at: z.string(),
+});
+
+export const promptRankingSchema = z.object({
+  score: z.number(),
+  position: z.number(),
+});
+
+export const promptLearningSchema = z.object({
+  feedback_score: z.number().min(0).max(10).nullable(),
+  historical_average_score: z.number().min(0).max(10),
+  improvement_trend: z.string(),
+  recommendations: z.array(z.string()),
+});
+
+export const promptGovernanceSchema = z.object({
+  rate_limited: z.boolean(),
+  quota_remaining: z.number().min(0),
+  request_allowed: z.boolean(),
+});
+
+export const promptAuditSchema = z.object({
+  request_id: z.string(),
+  timestamp: z.string(),
+  user_id: z.string(),
+  team_id: z.string().nullable(),
+});
+
+export const promptAiBackendSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  fallback_used: z.boolean(),
+});
+
+export const promptFallbackSchema = z.object({
+  used_fallback: z.boolean(),
+  fallback_type: z.string(),
+  fallback_quality: z.string(),
+});
+
+export const promptJsonValidationSchema = z.object({
+  is_valid: z.boolean(),
+  attempts: z.number().min(1),
+  auto_fixed: z.boolean(),
+});
+
+export const promptResponseSchema = z.object({
+  prompt_spec: promptSpecSchema,
+  quality_score: z.number().min(0).max(10),
+  validation: promptValidationSchema,
+  iterations: z.number().min(1),
+  performance: promptPerformanceSchema,
+  json_validation: promptJsonValidationSchema,
+  ai_backend: promptAiBackendSchema,
+  fallback: promptFallbackSchema,
+  cache: promptCacheSchema,
+  versioning: promptVersioningSchema,
+  ranking: promptRankingSchema,
+  learning: promptLearningSchema,
+  governance: promptGovernanceSchema,
+  audit: promptAuditSchema,
+  status: z.enum(["success", "improved", "cached", "failed", "blocked", "fixed"]),
+});
+
+export type PromptSpec = z.infer<typeof promptSpecSchema>;
+export type PromptResponse = z.infer<typeof promptResponseSchema>;
