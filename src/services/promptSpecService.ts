@@ -1,13 +1,28 @@
 import { execSync } from 'child_process';
-import { openAiClient, ollamaClient } from "../utils/openAiClient.js";
+import { geminiClient, ollamaClient } from "../utils/geminiClient.js";
+import { classifyPromptDetailed, type ClassificationResult, type PromptComplexity } from "../utils/promptClassifier.js";
 import { promptSpecSchema, PromptSpec } from "../schemas/promptSpec.js";
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
+import { buildSpecFromTemplate } from "../spec/builder/specBuilder.js";
+import { calculateConfidence, type ConfidenceReport } from "../spec/confidence/confidenceEngine.js";
+import { isCanonicalField, validateSchemaCompatibility } from "../spec/contracts/canonicalFields.js";
+import { createDeterministicPlan, parsePlanDocument } from "../spec/planner/planDocument.js";
+import { selectTemplate } from "../spec/templates/registry.js";
+import { resolveTemplateComposition } from "../spec/templates/composition.js";
+import { SemanticCache } from "../cache/semantic/semanticCache.js";
+import { createTraceContext, logEvent } from "../observability/logger.js";
+import { incrementMetric, observeMetric } from "../observability/metrics.js";
+import { resolveExecutionPolicy, riskAllowsProvider, type ExecutionPolicy } from "../governance/policies/policyEngine.js";
+import { getProviderHealth, recordProviderResult } from "../governance/providers/providerGovernance.js";
+import { validateSpecSafety } from "../governance/safety/safetyEngine.js";
 
-const MODEL_NAME = "gpt-4o-mini";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
 const MAX_GENERATION_ATTEMPTS = 2;
+const AI_COMPLETION_TIMEOUT_MS = Number(process.env.AI_COMPLETION_TIMEOUT_MS) || 30000;
 const HISTORY_FILE = join(process.cwd(), 'promptSpecHistory.json');
+const semanticSpecCache = new SemanticCache<NormalizedSpec>();
 
 interface SpecHistoryEntry {
   id: string;
@@ -43,7 +58,7 @@ function loadHistory(): void {
       analyzePatterns();
     }
   } catch (error) {
-    console.warn('Failed to load spec history:', error);
+    logEvent("warn", "learning_history_load_failed", { reason: error instanceof Error ? error.message : String(error) });
     specHistory = [];
   }
 }
@@ -52,7 +67,7 @@ function saveHistory(): void {
   try {
     writeFileSync(HISTORY_FILE, JSON.stringify(specHistory, null, 2));
   } catch (error) {
-    console.warn('Failed to save spec history:', error);
+    logEvent("warn", "learning_history_save_failed", { reason: error instanceof Error ? error.message : String(error) });
   }
 }
 
@@ -139,7 +154,17 @@ function improveWithLearning(baseSpec: PromptSpec, prompt: string): { improvedSp
   const improvements: string[] = [];
   let improvedSpec = { ...baseSpec };
 
-  // Apply high-quality input patterns
+  // First: Try domain-aware enrichment
+  const domainMatch = detectDomain(prompt);
+  if (domainMatch) {
+    // Enrich output fields with domain template
+    if (Object.keys(improvedSpec.output_fields).length < 2) {
+      improvedSpec.output_fields = enrichOutputFieldsWithTemplate(improvedSpec.output_fields, domainMatch.template);
+      improvements.push(`Applied domain-specific template: ${domainMatch.domain}`);
+    }
+  }
+
+  // Apply high-quality input patterns from history
   const promptWords = prompt.toLowerCase().split(/\s+/);
   const relevantKeywords = promptWords.filter(word => learningPatterns.domain_keywords[word]);
 
@@ -173,8 +198,21 @@ function improveWithLearning(baseSpec: PromptSpec, prompt: string): { improvedSp
   }
 
   if (learningPatterns.low_quality_patterns.includes('empty_output_fields') && Object.keys(improvedSpec.output_fields).length === 0) {
-    improvedSpec.output_fields.response = { type: 'string', description: 'Primary response output based on learning' };
-    improvements.push('Added default output field to prevent empty output_fields');
+    // Try domain enrichment for empty outputs
+    if (domainMatch) {
+      improvedSpec.output_fields = enrichOutputFieldsWithTemplate({}, domainMatch.template);
+      improvements.push(`Enriched empty output_fields using domain template: ${domainMatch.domain}`);
+    } else {
+      improvedSpec.output_fields.response = { 
+        type: 'object', 
+        description: 'Structured response output',
+        properties: {
+          data: { type: 'object', description: 'Response data' },
+          metadata: { type: 'object', description: 'Response metadata' }
+        }
+      };
+      improvements.push('Added structured default output field to prevent empty output_fields');
+    }
   }
 
   if (learningPatterns.low_quality_patterns.includes('generic_result_output') && improvedSpec.output_fields.result) {
@@ -242,6 +280,27 @@ interface FieldInferenceRule {
   output_fields: Array<{ name: string; type: string; description: string }>;
 }
 
+interface OutputTemplate {
+  name: string;
+  keywords: string[];
+  description: string;
+  outputSchema: {
+    [fieldName: string]: {
+      type: string;
+      description: string;
+      properties?: Record<string, any>;
+      items?: Record<string, any>;
+      required?: string[];
+    };
+  };
+}
+
+interface DomainPattern {
+  domain: string;
+  keywords: string[];
+  outputTemplates: OutputTemplate[];
+}
+
 const FIELD_INFERENCE_RULES: FieldInferenceRule[] = [
   {
     keywords: ['código', 'code', 'program', 'script', 'function'],
@@ -303,6 +362,481 @@ const FIELD_INFERENCE_RULES: FieldInferenceRule[] = [
   }
 ];
 
+// COMPREHENSIVE DOMAIN-SPECIFIC OUTPUT ENRICHMENT TEMPLATES
+const DOMAIN_PATTERNS: DomainPattern[] = [
+  {
+    domain: "code_analysis",
+    keywords: ["code", "código", "bug", "erro", "analysis", "review", "refactor"],
+    outputTemplates: [
+      {
+        name: "code_issues",
+        keywords: ["bug", "issue", "error", "problem"],
+        description: "Structured output for code analysis and bug detection",
+        outputSchema: {
+          issues: {
+            type: "array",
+            description: "List of identified code issues",
+            items: {
+              type: "object",
+              properties: {
+                type: { type: "string", description: "Type of issue (bug, style, performance, security)" },
+                severity: { type: "string", enum: ["critical", "high", "medium", "low"], description: "Severity level" },
+                line: { type: "number", description: "Line number where issue occurs" },
+                column: { type: "number", description: "Column position of the issue" },
+                description: { type: "string", description: "Detailed description of the issue" },
+                fix: { type: "string", description: "Suggested code fix or remediation" },
+                category: { type: "string", description: "Category (logic, performance, security, style)" }
+              },
+              required: ["type", "severity", "line", "description", "fix"]
+            }
+          },
+          summary: {
+            type: "object",
+            description: "Summary statistics of code analysis",
+            properties: {
+              total_issues: { type: "number" },
+              critical_count: { type: "number" },
+              high_count: { type: "number" },
+              medium_count: { type: "number" },
+              low_count: { type: "number" },
+              quality_score: { type: "number", description: "Overall code quality score (0-100)" }
+            }
+          },
+          recommendations: {
+            type: "array",
+            description: "High-level recommendations for improvement",
+            items: {
+              type: "object",
+              properties: {
+                priority: { type: "string", enum: ["immediate", "important", "nice-to-have"] },
+                description: { type: "string" },
+                impact: { type: "string", description: "Expected impact (performance, security, maintainability)" }
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    domain: "data_processing",
+    keywords: ["data", "database", "query", "sql", "table", "análisis", "analytics"],
+    outputTemplates: [
+      {
+        name: "data_results",
+        keywords: ["results", "output", "processed"],
+        description: "Structured output for data processing and analytics",
+        outputSchema: {
+          results: {
+            type: "array",
+            description: "Array of processed data records",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string", description: "Unique identifier for the record" },
+                data: { type: "object", description: "The actual data record" },
+                metrics: { type: "object", description: "Calculated metrics for this record" },
+                status: { type: "string", description: "Processing status (success, warning, error)" }
+              }
+            }
+          },
+          metadata: {
+            type: "object",
+            description: "Metadata about the data operation",
+            properties: {
+              total_records: { type: "number" },
+              processed_records: { type: "number" },
+              failed_records: { type: "number" },
+              execution_time_ms: { type: "number" },
+              data_volume_bytes: { type: "number" },
+              quality_score: { type: "number" }
+            }
+          },
+          statistics: {
+            type: "object",
+            description: "Statistical summary of the data",
+            properties: {
+              count: { type: "number" },
+              sum: { type: "number" },
+              average: { type: "number" },
+              min: { type: "number" },
+              max: { type: "number" },
+              percentiles: { type: "object" }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    domain: "api_specification",
+    keywords: ["api", "endpoint", "request", "response", "http", "rest", "graphql"],
+    outputTemplates: [
+      {
+        name: "api_specification",
+        keywords: ["spec", "specification", "schema"],
+        description: "Comprehensive API specification with detailed structures",
+        outputSchema: {
+          endpoints: {
+            type: "array",
+            description: "List of API endpoints with full specifications",
+            items: {
+              type: "object",
+              properties: {
+                path: { type: "string", description: "API endpoint path" },
+                method: { type: "string", enum: ["GET", "POST", "PUT", "DELETE", "PATCH"] },
+                description: { type: "string" },
+                parameters: {
+                  type: "object",
+                  description: "Query/path parameters",
+                  properties: {
+                    name: { type: "string" },
+                    type: { type: "string" },
+                    required: { type: "boolean" },
+                    description: { type: "string" }
+                  }
+                },
+                request_body: { type: "object", description: "Request body schema" },
+                response_schema: { type: "object", description: "Expected response structure" },
+                status_codes: {
+                  type: "object",
+                  description: "Possible HTTP status codes",
+                  properties: {
+                    code: { type: "number" },
+                    description: { type: "string" }
+                  }
+                },
+                authentication: { type: "string", description: "Auth method required" },
+                rate_limit: { type: "string", description: "Rate limiting policy" }
+              }
+            }
+          },
+          common_responses: {
+            type: "object",
+            description: "Common response patterns used across API",
+            properties: {
+              error_response: { type: "object" },
+              success_response: { type: "object" },
+              pagination: { type: "object" }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    domain: "content_generation",
+    keywords: ["text", "write", "generate", "content", "article", "document", "nlp"],
+    outputTemplates: [
+      {
+        name: "generated_content",
+        keywords: ["generated", "written"],
+        description: "Structured output for generated content with metadata",
+        outputSchema: {
+          content: {
+            type: "string",
+            description: "The main generated or processed text content"
+          },
+          sections: {
+            type: "array",
+            description: "Structured sections within the content",
+            items: {
+              type: "object",
+              properties: {
+                title: { type: "string" },
+                content: { type: "string" },
+                type: { type: "string", enum: ["introduction", "body", "conclusion", "summary"] },
+                key_points: { type: "array", items: { type: "string" } }
+              }
+            }
+          },
+          analysis: {
+            type: "object",
+            description: "Content analysis and metrics",
+            properties: {
+              word_count: { type: "number" },
+              readability_score: { type: "number" },
+              sentiment: { type: "string", enum: ["positive", "neutral", "negative"] },
+              key_topics: { type: "array", items: { type: "string" } },
+              tone: { type: "string" },
+              quality_metrics: { type: "object" }
+            }
+          },
+          metadata: {
+            type: "object",
+            description: "Generation metadata and parameters",
+            properties: {
+              model_used: { type: "string" },
+              generation_time_ms: { type: "number" },
+              temperature: { type: "number" },
+              tokens_used: { type: "number" }
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    domain: "ui_component",
+    keywords: ["ui", "component", "interface", "react", "vue", "angular", "frontend"],
+    outputTemplates: [
+      {
+        name: "component_specification",
+        keywords: ["component", "spec"],
+        description: "Complete UI component specification",
+        outputSchema: {
+          component: {
+            type: "object",
+            description: "Main component definition",
+            properties: {
+              name: { type: "string" },
+              description: { type: "string" },
+              type: { type: "string", enum: ["functional", "class", "hook"] },
+              props: {
+                type: "object",
+                description: "Component props definition",
+                properties: {
+                  name: { type: "string" },
+                  type: { type: "string" },
+                  required: { type: "boolean" },
+                  default: { type: "string" },
+                  description: { type: "string" }
+                }
+              },
+              state: { type: "object", description: "Internal state definition" },
+              events: { type: "array", items: { type: "object" }, description: "Emitted events" }
+            }
+          },
+          structure: {
+            type: "object",
+            description: "Visual structure and layout",
+            properties: {
+              layout: { type: "string", description: "Layout type (flex, grid, etc.)" },
+              children_slots: { type: "array", items: { type: "object" } },
+              responsive_behavior: { type: "object" }
+            }
+          },
+          styling: {
+            type: "object",
+            description: "CSS and styling specifications",
+            properties: {
+              colors: { type: "object" },
+              typography: { type: "object" },
+              spacing: { type: "object" },
+              animations: { type: "array", items: { type: "object" } }
+            }
+          },
+          accessibility: {
+            type: "object",
+            description: "Accessibility features and ARIA roles",
+            properties: {
+              aria_roles: { type: "array" },
+              keyboard_support: { type: "boolean" },
+              screen_reader_friendly: { type: "boolean" },
+              wcag_level: { type: "string" }
+            }
+          }
+        }
+      }
+    ]
+  }
+];
+
+// OUTPUT ENRICHMENT ENGINE
+function detectDomain(prompt: string): { domain: string; pattern: DomainPattern; template: OutputTemplate } | null {
+  const lowerPrompt = prompt.toLowerCase();
+  
+  for (const pattern of DOMAIN_PATTERNS) {
+    const matchesKeyword = pattern.keywords.some(keyword => lowerPrompt.includes(keyword));
+    if (matchesKeyword) {
+      for (const template of pattern.outputTemplates) {
+        const matchesTemplate = template.keywords.some(keyword => lowerPrompt.includes(keyword));
+        if (matchesTemplate) {
+          return { domain: pattern.domain, pattern, template };
+        }
+      }
+      // If no template matches, use the first one
+      return { domain: pattern.domain, pattern, template: pattern.outputTemplates[0] };
+    }
+  }
+  return null;
+}
+
+function enrichOutputFieldsWithTemplate(fields: Record<string, any>, template: OutputTemplate): Record<string, any> {
+  const enriched: Record<string, any> = {};
+
+  // Use template schema directly
+  Object.entries(template.outputSchema).forEach(([key, schema]) => {
+    enriched[key] = {
+      type: schema.type,
+      description: schema.description,
+      ...(schema.properties && { properties: schema.properties }),
+      ...(schema.items && { items: schema.items }),
+      ...(schema.required && { required: schema.required })
+    };
+  });
+
+  return enriched;
+}
+
+function isGenericOutput(fields: Record<string, any>): boolean {
+  const genericPatterns = [
+    'result',
+    'output',
+    'data',
+    'response',
+    'item',
+    'value',
+    'object'
+  ];
+  
+  const fieldNames = Object.keys(fields);
+  return fieldNames.every(name => genericPatterns.includes(name.toLowerCase()));
+}
+
+function detectAntiPatterns(spec: PromptSpec): { detected: string[]; severity: 'critical' | 'high' | 'medium' }[] {
+  const issues: { detected: string[]; severity: 'critical' | 'high' | 'medium' }[] = [];
+
+  // Check for empty structures
+  if (Object.keys(spec.output_fields).length === 0) {
+    issues.push({ detected: ['empty_output_fields'], severity: 'critical' });
+  }
+
+  // Check for generic field names
+  const outputFieldNames = Object.keys(spec.output_fields);
+  const hasGenericFields = outputFieldNames.some(name => 
+    ['result', 'output', 'data', 'response'].includes(name.toLowerCase())
+  );
+  if (hasGenericFields && outputFieldNames.length === 1) {
+    issues.push({ detected: ['single_generic_output'], severity: 'critical' });
+  }
+
+  // Check if all outputs are simple strings (not structured)
+  const allSimpleStrings = Object.values(spec.output_fields).every(field => 
+    (field as any).type === 'string' && !(field as any).properties
+  );
+  if (allSimpleStrings && outputFieldNames.length < 2) {
+    issues.push({ detected: ['non_structured_output'], severity: 'high' });
+  }
+
+  // Check for missing nested properties in object fields
+  Object.entries(spec.output_fields).forEach(([name, field]) => {
+    const f = field as any;
+    if ((f.type === 'object' || f.type === 'array') && !f.properties && !f.items) {
+      issues.push({ detected: [`incomplete_structure_${name}`], severity: 'medium' });
+    }
+  });
+
+  // Check task instruction
+  if (spec.task_instruction.length < 20) {
+    issues.push({ detected: ['vague_task_instruction'], severity: 'high' });
+  }
+
+  return issues;
+}
+
+function autoFixAntiPatterns(spec: PromptSpec, prompt: string): { fixed: PromptSpec; fixes: string[] } {
+  let fixed = { ...spec };
+  const fixes: string[] = [];
+  const antiPatterns = detectAntiPatterns(spec);
+
+  for (const issue of antiPatterns) {
+    if (issue.detected.includes('empty_output_fields')) {
+      const domainMatch = detectDomain(prompt);
+      if (domainMatch) {
+        fixed.output_fields = enrichOutputFieldsWithTemplate(fixed.output_fields, domainMatch.template);
+        fixes.push(`Enriched empty output_fields using domain template: ${domainMatch.domain}`);
+      }
+    }
+
+    if (issue.detected.includes('single_generic_output')) {
+      const domainMatch = detectDomain(prompt);
+      if (domainMatch) {
+        fixed.output_fields = enrichOutputFieldsWithTemplate({}, domainMatch.template);
+        fixes.push(`Replaced generic output with structured domain template: ${domainMatch.domain}`);
+      } else {
+        // Fallback: create multiple structured outputs
+        fixed.output_fields = {
+          structured_result: {
+            type: 'object',
+            description: 'Structured result with data and metadata',
+            properties: {
+              data: { type: 'object', description: 'The main data result' },
+              metadata: { type: 'object', description: 'Processing metadata' },
+              status: { type: 'string', description: 'Operation status' }
+            }
+          },
+          summary: {
+            type: 'object',
+            description: 'Summary and statistics',
+            properties: {
+              key_metrics: { type: 'object' },
+              processing_info: { type: 'object' }
+            }
+          }
+        };
+        fixes.push('Replaced single generic output with multiple structured outputs');
+      }
+    }
+
+    if (issue.detected.includes('non_structured_output')) {
+      const domainMatch = detectDomain(prompt);
+      if (domainMatch) {
+        fixed.output_fields = enrichOutputFieldsWithTemplate(fixed.output_fields, domainMatch.template);
+        fixes.push(`Converted simple outputs to structured domain template: ${domainMatch.domain}`);
+      } else {
+        // Add structured output alongside simple ones
+        const newOutputs = {
+          ...fixed.output_fields,
+          structured_data: {
+            type: 'object',
+            description: 'Structured data output with detailed properties',
+            properties: {
+              content: { type: 'object' },
+              metadata: { type: 'object' },
+              quality_metrics: { type: 'object' }
+            }
+          }
+        };
+        fixed.output_fields = newOutputs;
+        fixes.push('Added structured output alongside simple outputs');
+      }
+    }
+
+    issue.detected.forEach(det => {
+      if (det.startsWith('incomplete_structure_')) {
+        const fieldName = det.replace('incomplete_structure_', '');
+        const field = fixed.output_fields[fieldName] as any;
+        if (field.type === 'object' && !field.properties) {
+          field.properties = {
+            id: { type: 'string' },
+            data: { type: 'object' },
+            metadata: { type: 'object' }
+          };
+          fixes.push(`Added nested properties to object field: ${fieldName}`);
+        }
+        if (field.type === 'array' && !field.items) {
+          field.items = {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              data: { type: 'object' }
+            }
+          };
+          fixes.push(`Added item schema to array field: ${fieldName}`);
+        }
+      }
+    });
+
+    if (issue.detected.includes('vague_task_instruction')) {
+      fixed.task_instruction = `Provide detailed, structured, and actionable outputs for: ${prompt}. ${fixed.task_instruction}`;
+      fixes.push('Enhanced task instruction with specificity requirement');
+    }
+  }
+
+  return { fixed, fixes };
+}
+
 const QUALITY_RULES: QualityRule[] = [
   {
     description: 'input_fields must not be empty',
@@ -320,6 +854,10 @@ const QUALITY_RULES: QualityRule[] = [
     check: (spec) => Object.keys(spec.output_fields).length > 0,
     fix: (spec, prompt) => {
       if (Object.keys(spec.output_fields).length === 0) {
+        const domainMatch = detectDomain(prompt);
+        if (domainMatch) {
+          return { ...spec, output_fields: enrichOutputFieldsWithTemplate({}, domainMatch.template) };
+        }
         const inferredFields = inferFieldsFromPrompt(prompt, 'output');
         return { ...spec, output_fields: inferredFields };
       }
@@ -327,13 +865,80 @@ const QUALITY_RULES: QualityRule[] = [
     }
   },
   {
-    description: 'no generic field names like "result"',
-    check: (spec) => !Object.keys(spec.output_fields).includes('result'),
+    description: 'output must contain structured objects or arrays when applicable',
+    check: (spec) => {
+      const hasStructured = Object.values(spec.output_fields).some(field => {
+        const f = field as any;
+        return (f.type === 'object' || f.type === 'array') && (f.properties || f.items);
+      });
+      return hasStructured || Object.keys(spec.output_fields).length === 0;
+    },
     fix: (spec, prompt) => {
-      if (spec.output_fields.result) {
-        delete spec.output_fields.result;
-        const inferredFields = inferFieldsFromPrompt(prompt, 'output');
-        return { ...spec, output_fields: { ...spec.output_fields, ...inferredFields } };
+      const hasStructured = Object.values(spec.output_fields).some(field => {
+        const f = field as any;
+        return (f.type === 'object' || f.type === 'array') && (f.properties || f.items);
+      });
+
+      if (!hasStructured && Object.keys(spec.output_fields).length > 0) {
+        const domainMatch = detectDomain(prompt);
+        if (domainMatch) {
+          return { ...spec, output_fields: enrichOutputFieldsWithTemplate(spec.output_fields, domainMatch.template) };
+        }
+
+        // Fallback: convert first string field to structured
+        const updated = { ...spec };
+        const firstKey = Object.keys(updated.output_fields)[0];
+        if (firstKey && (updated.output_fields[firstKey] as any).type === 'string') {
+          (updated.output_fields[firstKey] as any).type = 'object';
+          (updated.output_fields[firstKey] as any).properties = {
+            data: { type: 'object' },
+            metadata: { type: 'object' }
+          };
+        }
+        return updated;
+      }
+      return spec;
+    }
+  },
+  {
+    description: 'no single generic field names like "result"',
+    check: (spec) => {
+      const fields = Object.keys(spec.output_fields);
+      const hasGenericOnly = fields.length === 1 && ['result', 'output'].includes(fields[0].toLowerCase());
+      return !hasGenericOnly;
+    },
+    fix: (spec, prompt) => {
+      const fields = Object.keys(spec.output_fields);
+      const hasGenericOnly = fields.length === 1 && ['result', 'output'].includes(fields[0].toLowerCase());
+
+      if (hasGenericOnly) {
+        const domainMatch = detectDomain(prompt);
+        if (domainMatch) {
+          return { ...spec, output_fields: enrichOutputFieldsWithTemplate({}, domainMatch.template) };
+        }
+
+        // Create a more descriptive output structure
+        return {
+          ...spec,
+          output_fields: {
+            data: {
+              type: 'object',
+              description: 'Structured data result with detailed information',
+              properties: {
+                content: { type: 'object', description: 'Main content' },
+                metadata: { type: 'object', description: 'Metadata and context' }
+              }
+            },
+            summary: {
+              type: 'object',
+              description: 'Summary of the operation with key metrics',
+              properties: {
+                status: { type: 'string' },
+                quality_score: { type: 'number' }
+              }
+            }
+          }
+        };
       }
       return spec;
     }
@@ -343,27 +948,48 @@ const QUALITY_RULES: QualityRule[] = [
     check: (spec) => spec.task_instruction.length > 15 && !spec.task_instruction.toLowerCase().includes('generate something'),
     fix: (spec, prompt) => {
       if (spec.task_instruction.length <= 15 || spec.task_instruction.toLowerCase().includes('generate something')) {
-        const enhanced = `Process and handle the following request: ${prompt}. ${spec.task_instruction}`;
+        const enhanced = `Provide detailed, structured, and production-grade outputs for: ${prompt}. ${spec.task_instruction}`;
         return { ...spec, task_instruction: enhanced };
       }
       return spec;
     }
   },
   {
-    description: 'output should contain structured objects when applicable',
-    check: (spec) => Object.values(spec.output_fields).some(field => (field as any).type === 'object' || (field as any).type === 'array'),
+    description: 'output fields should have nested properties defining structure',
+    check: (spec) => {
+      return Object.values(spec.output_fields).some(field => {
+        const f = field as any;
+        return f.properties || f.items;
+      });
+    },
     fix: (spec, prompt) => {
-      const hasStructured = Object.values(spec.output_fields).some(field => (field as any).type === 'object' || (field as any).type === 'array');
-      if (!hasStructured) {
-        const inferredFields = inferFieldsFromPrompt(prompt, 'output');
-        const structuredFields = Object.fromEntries(
-          Object.entries(inferredFields).filter(([, field]) => field.type === 'object' || field.type === 'array')
-        );
-        if (Object.keys(structuredFields).length > 0) {
-          return { ...spec, output_fields: { ...spec.output_fields, ...structuredFields } };
-        }
+      const domainMatch = detectDomain(prompt);
+      if (domainMatch) {
+        return { ...spec, output_fields: enrichOutputFieldsWithTemplate(spec.output_fields, domainMatch.template) };
       }
-      return spec;
+
+      // Add nested properties to fields that lack them
+      const updated = { ...spec };
+      Object.entries(updated.output_fields).forEach(([key, field]) => {
+        const f = field as any;
+        if (!f.properties && !f.items) {
+          if (f.type === 'object') {
+            f.properties = {
+              content: { type: 'object', description: 'Main content' },
+              metadata: { type: 'object', description: 'Metadata' }
+            };
+          } else if (f.type === 'array') {
+            f.items = {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                data: { type: 'object' }
+              }
+            };
+          }
+        }
+      });
+      return updated;
     }
   }
 ];
@@ -413,12 +1039,19 @@ function enforceQualityStandards(spec: PromptSpec, prompt: string): { spec: Prom
   const appliedFixes: string[] = [];
   let qualityScore = 10;
 
+  // First pass: apply anti-pattern fixes
+  const { fixed: antiPatternFixed, fixes: antiPatternFixes } = autoFixAntiPatterns(currentSpec, prompt);
+  currentSpec = antiPatternFixed;
+  appliedFixes.push(...antiPatternFixes);
+  qualityScore -= Math.min(antiPatternFixes.length, 2); // Max 2 points for anti-patterns
+
+  // Second pass: apply quality rules
   for (const rule of QUALITY_RULES) {
     if (!rule.check(currentSpec)) {
-      console.debug(`Quality rule failed: ${rule.description}, applying fix`);
+      logEvent("debug", "quality_rule_applied", { rule: rule.description });
       currentSpec = rule.fix(currentSpec, prompt);
       appliedFixes.push(rule.description);
-      qualityScore -= 1; // Deduct point for each fix needed
+      qualityScore -= 1; // Deduct point for each rule fix needed
     }
   }
 
@@ -437,235 +1070,43 @@ function calculateQualityScore(spec: PromptSpec): number {
   if (Object.keys(spec.output_fields).includes('result')) score -= 2;
   if (spec.task_instruction.length < 15) score -= 2;
 
+  // Penalty for generic outputs
+  const antiPatterns = detectAntiPatterns(spec);
+  score -= antiPatterns.filter(p => p.severity === 'critical').length * 2;
+  score -= antiPatterns.filter(p => p.severity === 'high').length;
+
   // Bonus for structured outputs
-  const hasStructuredOutput = Object.values(spec.output_fields).some(field => (field as any).type === 'object' || (field as any).type === 'array');
-  if (hasStructuredOutput) score += 1;
+  const hasStructuredOutput = Object.values(spec.output_fields).some(field => {
+    const f = field as any;
+    return (f.type === 'object' || f.type === 'array') && (f.properties || f.items);
+  });
+  if (hasStructuredOutput) score += 2;
 
   // Bonus for domain-specific fields
   const hasDomainFields = Object.keys(spec.input_fields).some(key => !['user_input', 'input'].includes(key));
   if (hasDomainFields) score += 1;
 
+  // Bonus for detailed nested properties
+  let nestedPropertyCount = 0;
+  Object.values(spec.output_fields).forEach(field => {
+    const f = field as any;
+    if (f.properties) {
+      nestedPropertyCount += Object.keys(f.properties).length;
+    }
+  });
+  if (nestedPropertyCount >= 5) score += 2;
+  else if (nestedPropertyCount >= 3) score += 1;
+
   return Math.max(0, Math.min(10, score));
 }
 
-// Schema Normalization and Standardization System
-interface NormalizedSpec {
-  prompt_spec: PromptSpec;
-  metadata: {
-    quality_score: number;
-    validation: {
-      is_valid: boolean;
-      issues: string[];
-      attempts: number;
-      auto_fixed: boolean;
-    };
-    performance: {
-      generation_time: number;
-      iterations: number;
-      backend_used: string;
-    };
-    ai_backend: AiBackend;
-    fallback: {
-      used: boolean;
-      reason?: string;
-    };
-  };
-}
-
-function toSnakeCase(str: string): string {
-  return str
-    .replace(/([a-z])([A-Z])/g, '$1_$2')
-    .replace(/[\s-]/g, '_')
-    .toLowerCase()
-    .replace(/_{2,}/g, '_')
-    .replace(/^_|_$/g, '');
-}
-
-function generateFieldDescription(fieldName: string, context?: string): string {
-  const snakeName = toSnakeCase(fieldName);
-  const descriptions: Record<string, string> = {
-    'code_snippet': 'The code snippet or program to be processed',
-    'language': 'Programming language of the code',
-    'component_name': 'Name of the UI component',
-    'props': 'Component properties and configuration',
-    'endpoint': 'API endpoint URL',
-    'method': 'HTTP method (GET, POST, etc.)',
-    'payload': 'Request payload or parameters',
-    'data_source': 'Source of the data to process',
-    'query': 'Query or operation to perform',
-    'results': 'Query results or processed data',
-    'content': 'Text content to process or generate',
-    'parameters': 'Processing parameters and options',
-    'response': 'The processed response or result',
-    'status': 'Status of the processing operation',
-    'analysis': 'Detailed analysis of the input',
-    'summary': 'Concise summary of the results',
-    'issues': 'Identified issues or problems',
-    'suggestions': 'Improvement suggestions',
-    'metadata': 'Additional information about the process',
-    'user_input': 'Primary user input for processing',
-    'generated_content': 'Generated content or result',
-    'processed_content': 'Processed or generated text content',
-    'ui_structure': 'UI component structure and layout',
-    'styles': 'CSS styles and theming',
-    'behavior': 'Component behavior and interactions',
-    'response_schema': 'Expected response structure',
-    'status_codes': 'Possible HTTP status codes and meanings'
-  };
-
-  return descriptions[snakeName] || `The ${snakeName.replace(/_/g, ' ')} for this operation`;
-}
-
-function normalizeFieldName(name: string): string {
-  const normalized = toSnakeCase(name);
-
-  // Avoid generic names
-  const genericNames = ['data', 'result', 'output', 'input', 'value', 'item'];
-  if (genericNames.includes(normalized)) {
-    return `${normalized}_content`;
-  }
-
-  return normalized;
-}
-
-function normalizeFieldType(type: string): string {
-  const validTypes = ['string', 'number', 'boolean', 'object', 'array'];
-  return validTypes.includes(type.toLowerCase()) ? type.toLowerCase() : 'string';
-}
-
-function normalizeInputFields(fields: Record<string, any>): Record<string, any> {
-  const normalized: Record<string, any> = {};
-
-  Object.entries(fields).forEach(([key, field]) => {
-    const normalizedKey = normalizeFieldName(key);
-    const normalizedField: any = {
-      type: normalizeFieldType(field?.type || 'string'),
-      description: field?.description || generateFieldDescription(normalizedKey)
-    };
-    normalized[normalizedKey] = normalizedField;
-  });
-
-  return normalized;
-}
-
-function normalizeOutputFields(fields: Record<string, any>): Record<string, any> {
-  const normalized: Record<string, any> = {};
-
-  Object.entries(fields).forEach(([key, field]) => {
-    const normalizedKey = normalizeFieldName(key);
-    const type = normalizeFieldType(field?.type || 'string');
-
-    // Ensure structured outputs
-    let normalizedField: any;
-    if (type === 'string' && !['summary', 'status', 'message'].includes(normalizedKey)) {
-      // Convert simple strings to structured objects when appropriate
-      normalizedField = {
-        type: 'object',
-        description: field?.description || generateFieldDescription(normalizedKey),
-        properties: {
-          content: {
-            type: 'string',
-            description: 'The main content of this output'
-          },
-          metadata: {
-            type: 'object',
-            description: 'Additional metadata for this output'
-          }
-        }
-      };
-    } else {
-      normalizedField = {
-        type,
-        description: field?.description || generateFieldDescription(normalizedKey)
-      };
-    }
-
-    normalized[normalizedKey] = normalizedField;
-  });
-
-  // Ensure at least one structured output
-  const hasStructured = Object.values(normalized).some((field: any) => field.type === 'object' || field.type === 'array');
-  if (!hasStructured) {
-    normalized.structured_result = {
-      type: 'object',
-      description: 'Structured result containing all processing outputs',
-      properties: {
-        data: {
-          type: 'object',
-          description: 'The main structured data result'
-        },
-        metadata: {
-          type: 'object',
-          description: 'Metadata about the processing operation'
-        }
-      }
-    };
-  }
-
-  return normalized;
-}
-
-function normalizeTaskInstruction(instruction: string): string {
-  // Ensure it's specific and actionable
-  if (instruction.length < 20 || instruction.toLowerCase().includes('generate something')) {
-    return `Process and provide structured results for: ${instruction}`;
-  }
-  return instruction;
-}
-
-function normalizeSpec(spec: PromptSpec, qualityScore: number, validation: any, performance: any, aiBackend: AiBackend, fallback: any): NormalizedSpec {
-  const normalizedPromptSpec: PromptSpec = {
-    task_instruction: normalizeTaskInstruction(spec.task_instruction),
-    input_fields: normalizeInputFields(spec.input_fields),
-    output_fields: normalizeOutputFields(spec.output_fields)
-  };
-
-  const normalizedSpec: NormalizedSpec = {
-    prompt_spec: normalizedPromptSpec,
-    metadata: {
-      quality_score: qualityScore,
-      validation: validation,
-      performance: performance,
-      ai_backend: aiBackend,
-      fallback: fallback
-    }
-  };
-
-  return normalizedSpec;
-}
-
-function validateConsistency(spec: NormalizedSpec): { isConsistent: boolean; issues: string[] } {
-  const issues: string[] = [];
-
-  // Check required top-level structure
-  if (!spec.prompt_spec) issues.push('Missing prompt_spec');
-  if (!spec.metadata) issues.push('Missing metadata');
-
-  // Check prompt_spec structure
-  if (spec.prompt_spec) {
-    if (!spec.prompt_spec.task_instruction) issues.push('Missing task_instruction');
-    if (!spec.prompt_spec.input_fields) issues.push('Missing input_fields');
-    if (!spec.prompt_spec.output_fields) issues.push('Missing output_fields');
-  }
-
-  // Check metadata structure
-  if (spec.metadata) {
-    const requiredMetaKeys = ['quality_score', 'validation', 'performance', 'ai_backend', 'fallback'];
-    requiredMetaKeys.forEach(key => {
-      if (!(key in spec.metadata)) issues.push(`Missing metadata.${key}`);
-    });
-  }
-
-  return { isConsistent: issues.length === 0, issues };
-}
-
-const SYSTEM_INSTRUCTION = `You are a prompt engineering assistant. Convert raw user text into a complete, structured, and non-generic JSON Prompt Specification.
+const SYSTEM_INSTRUCTION = `You are an expert prompt engineering assistant specializing in creating deeply structured, production-grade specifications.
 
 CRITICAL: You MUST return ONLY valid JSON. No text before or after the JSON. No explanations. No markdown.
 
 REQUIRED JSON STRUCTURE:
 {
-  "task_instruction": "Detailed, specific instruction (not generic)",
+  "task_instruction": "Detailed, specific, actionable instruction that ensures rich, structured outputs",
   "input_fields": {
     "field_name": {
       "type": "string|number|boolean|object|array",
@@ -680,27 +1121,61 @@ REQUIRED JSON STRUCTURE:
   }
 }
 
-MANDATORY RULES:
-- input_fields must NOT be empty
-- output_fields must NOT be empty
-- Each field must have "type" and "description"
-- No generic fields like "result" or "output"
-- task_instruction must be specific and actionable
-- Return ONLY the JSON object, nothing else`;
+MANDATORY RULES FOR PRODUCTION-GRADE SPECS:
+1. input_fields must NOT be empty
+2. output_fields must NOT be empty - ensure multiple structured outputs
+3. Each field must have "type" and "description"
+4. NO generic fields like "result", "output", "data", "item" as single outputs
+5. Convert simple string outputs to structured objects with nested properties
+6. Include domain-specific properties based on prompt context:
+   - For code analysis: type, severity, line, description, fix, category
+   - For data processing: id, data, metrics, status
+   - For APIs: path, method, parameters, response_schema, status_codes
+   - For content: sections, key_points, analysis, metadata
+7. task_instruction must be specific, detailed, and actionable
+8. When in doubt, provide MULTIPLE structured outputs rather than single generic ones
+9. Return ONLY the JSON object, nothing else
 
-const IMPROVEMENT_INSTRUCTION = `You are a prompt engineering assistant. Fix the following invalid Prompt Specification to make it complete, structured, and valid.
+QUALITY CHECKLIST:
+✓ Output contains array or object types (not just strings)
+✓ Objects have meaningful nested properties
+✓ Output is domain-relevant and specific
+✓ Each field has description explaining content and usage
+✓ Structure is immediately actionable in applications`;
 
-PROBLEMS TO FIX:
-- Empty input_fields or output_fields
-- Missing type or description in fields
-- Generic fields like "result"
-- Vague task_instruction
+const GEMINI_PLANNER_INSTRUCTION = `You are a planning assistant for an AI Specification Operating System.
+
+CRITICAL: You MUST NOT generate full schemas. The system owns schemas and final specification structure.
+
+Return ONLY a JSON object with this PlanDocument shape:
+{
+  "intent": "string",
+  "required_inputs": ["field_name"],
+  "required_outputs": ["field_name"],
+  "risk_level": "low|medium|high|critical",
+  "quality_constraints": ["constraint"],
+  "suggested_template": "template_id"
+}
+
+Use only one suggested_template from:
+security_analysis, frontend_component, api_design, architecture_design, code_refactor,
+observability_analysis, database_design, ai_orchestration, testing_strategy,
+performance_optimization, general_spec.`;
+
+const IMPROVEMENT_INSTRUCTION = `You are an expert prompt engineering assistant. Transform the following specification into deeply structured, production-grade output.
+
+TRANSFORMATION REQUIREMENTS:
+1. Expand generic outputs into rich, multi-field structures
+2. Add nested properties with type definitions
+3. Include domain-specific fields based on the context
+4. Ensure outputs are immediately consumable by applications
+5. Add detailed descriptions for each field
 
 REQUIRED OUTPUT FORMAT:
 Return ONLY this JSON structure:
 {
   "prompt_spec": {
-    "task_instruction": "Detailed specific instruction",
+    "task_instruction": "Detailed specific instruction for producing structured outputs",
     "input_fields": {
       "field_name": {
         "type": "string",
@@ -709,24 +1184,26 @@ Return ONLY this JSON structure:
     },
     "output_fields": {
       "field_name": {
-        "type": "string",
-        "description": "Clear description"
+        "type": "string|object|array",
+        "description": "Clear description",
+        "properties": { /* if object */ },
+        "items": { /* if array */ }
       }
     }
   },
-  "improvements_applied": "Brief description of what was fixed"
+  "improvements_applied": "List of structural improvements made"
 }
 
 MANDATORY: Return ONLY the JSON object, no explanations or text outside JSON.`;
 
 function getAvailableOllamaModels(): string[] {
   try {
-    const output = execSync('ollama list', { encoding: 'utf8' });
+    const output = execSync('ollama list', { encoding: 'utf8', timeout: 3000 });
     // Parse output: skip header, extract first column (NAME)
     const lines = output.trim().split('\n').slice(1);
     return lines.map(line => line.trim().split(/\s+/)[0]).filter(Boolean);
   } catch (error) {
-    console.warn('Failed to retrieve Ollama models list:', error instanceof Error ? error.message : error);
+    logEvent("warn", "ollama_models_unavailable", { reason: error instanceof Error ? error.message : String(error) });
     return [];
   }
 }
@@ -742,7 +1219,7 @@ function resolveOllamaModel(configuredModel: string): { resolvedModel: string; s
 
   // Exact match
   if (availableModels.includes(configuredModel)) {
-    console.debug('Ollama model validation: exact match', { configuredModel, resolvedModel: configuredModel, status: 'valid' });
+    logEvent("debug", "ollama_model_validated", { configuredModel, resolvedModel: configuredModel, status: "valid" });
     return { resolvedModel: configuredModel, status: 'valid', availableModels };
   }
 
@@ -752,7 +1229,7 @@ function resolveOllamaModel(configuredModel: string): { resolvedModel: string; s
     model.toLowerCase().includes(normalizedConfigured)
   );
   if (partialMatch) {
-    console.debug('Ollama model validation: partial match corrected', { configuredModel, resolvedModel: partialMatch, status: 'corrected' });
+    logEvent("debug", "ollama_model_validated", { configuredModel, resolvedModel: partialMatch, status: "corrected" });
     return { resolvedModel: partialMatch, status: 'corrected', availableModels };
   }
 
@@ -760,14 +1237,14 @@ function resolveOllamaModel(configuredModel: string): { resolvedModel: string; s
   if (!configuredModel.includes(':')) {
     const withLatest = `${configuredModel}:latest`;
     if (availableModels.includes(withLatest)) {
-      console.debug('Ollama model validation: appended :latest', { configuredModel, resolvedModel: withLatest, status: 'corrected' });
+      logEvent("debug", "ollama_model_validated", { configuredModel, resolvedModel: withLatest, status: "corrected" });
       return { resolvedModel: withLatest, status: 'corrected', availableModels };
     }
   }
 
   // Fallback to first available model
   const fallbackModel = availableModels[0];
-  console.warn('Ollama model validation: no match found, using fallback', { configuredModel, resolvedModel: fallbackModel, status: 'fallback', availableModels });
+  logEvent("warn", "ollama_model_fallback", { configuredModel, resolvedModel: fallbackModel, status: "fallback", availableModels });
   return { resolvedModel: fallbackModel, status: 'fallback', availableModels };
 }
 
@@ -775,7 +1252,7 @@ function extractJsonObject(rawText: string): string {
   const start = rawText.indexOf("{");
   const end = rawText.lastIndexOf("}");
   if (start === -1 || end === -1 || end <= start) {
-    throw new Error("Unable to extract JSON object from OpenAI response.");
+    throw new Error("Unable to extract JSON object from AI response.");
   }
   return rawText.slice(start, end + 1);
 }
@@ -850,79 +1327,88 @@ type AiBackend = {
   provider: string;
   model: string;
   fallback_used: boolean;
+  prompt_type?: PromptComplexity;
+  semantic_intent?: string;
+  risk_level?: string;
 };
 
-function selectBackend(preferredBackend: string = "auto"): { client: any; backend: AiBackend } {
+type BackendCandidate = {
+  client: any;
+  backend: AiBackend;
+};
+
+function createLlamaCandidate(classification: ClassificationResult, fallbackUsed: boolean): BackendCandidate | null {
+  if (!ollamaClient) return null;
+
+  const { resolvedModel } = resolveOllamaModel(OLLAMA_MODEL);
+  return {
+    client: ollamaClient,
+    backend: {
+      provider: "llama",
+      model: resolvedModel,
+      fallback_used: fallbackUsed,
+      prompt_type: classification.prompt_type,
+      semantic_intent: classification.semantic_intent,
+      risk_level: classification.risk_level,
+    }
+  };
+}
+
+function createGeminiCandidate(classification: ClassificationResult, fallbackUsed: boolean): BackendCandidate | null {
+  if (!geminiClient) return null;
+
+  return {
+    client: geminiClient,
+    backend: {
+      provider: "gemini",
+      model: GEMINI_MODEL,
+      fallback_used: fallbackUsed,
+      prompt_type: classification.prompt_type,
+      semantic_intent: classification.semantic_intent,
+      risk_level: classification.risk_level,
+    }
+  };
+}
+
+function selectBackend(preferredBackend: string = "auto", prompt: string = ""): { candidates: BackendCandidate[]; classification: ClassificationResult; policy: ExecutionPolicy } {
   const normalizedPreference = (preferredBackend || "auto").toLowerCase();
-  const ollamaAvailable = Boolean(ollamaClient);
-  const openAiAvailable = Boolean(openAiClient);
+  const classification = classifyPromptDetailed(prompt);
+  const policy = resolveExecutionPolicy(classification);
+  const candidates: BackendCandidate[] = [];
 
-  if (normalizedPreference === "ollama" && ollamaAvailable) {
+  const addLlama = (fallbackUsed: boolean) => {
     try {
-      const { resolvedModel } = resolveOllamaModel(OLLAMA_MODEL);
-      return {
-        client: ollamaClient,
-        backend: { provider: "ollama", model: resolvedModel, fallback_used: false }
-      };
+      const candidate = createLlamaCandidate(classification, fallbackUsed);
+      if (candidate) candidates.push(candidate);
     } catch (error) {
-      console.warn('Ollama model validation failed, falling back to OpenAI if available:', error instanceof Error ? error.message : error);
-      if (openAiAvailable) {
-        return {
-          client: openAiClient,
-          backend: { provider: "openai", model: MODEL_NAME, fallback_used: true }
-        };
-      }
-      throw new Error("Ollama selected but model validation failed, and no OpenAI available.");
+      logEvent("warn", "backend_unavailable", { backend: "llama", reason: error instanceof Error ? error.message : String(error) });
     }
+  };
+
+  const addGemini = (fallbackUsed: boolean) => {
+    const candidate = createGeminiCandidate(classification, fallbackUsed);
+    if (candidate) candidates.push(candidate);
+  };
+
+  if (normalizedPreference === "llama" || normalizedPreference === "ollama") {
+    if (!policy.disableLlama && riskAllowsProvider(classification.risk_level, "llama")) addLlama(false);
+    addGemini(true);
+    return { candidates, classification, policy };
   }
 
-  if (normalizedPreference === "openai" && openAiAvailable) {
-    return {
-      client: openAiClient,
-      backend: { provider: "openai", model: MODEL_NAME, fallback_used: false }
-    };
+  if (normalizedPreference === "gemini") {
+    addGemini(false);
+    return { candidates, classification, policy };
   }
 
-  if (normalizedPreference === "auto") {
-    if (ollamaAvailable) {
-      try {
-        const { resolvedModel } = resolveOllamaModel(OLLAMA_MODEL);
-        return {
-          client: ollamaClient,
-          backend: { provider: "ollama", model: resolvedModel, fallback_used: false }
-        };
-      } catch (error) {
-        console.warn('Ollama model validation failed, trying OpenAI:', error instanceof Error ? error.message : error);
-      }
-    }
-    if (openAiAvailable) {
-      return {
-        client: openAiClient,
-        backend: { provider: "openai", model: MODEL_NAME, fallback_used: false }
-      };
-    }
+  if (policy.provider === "llama" && !policy.disableLlama && riskAllowsProvider(classification.risk_level, "llama")) {
+    addLlama(false);
+    addGemini(true);
+  } else {
+    addGemini(false);
   }
 
-  if (ollamaAvailable) {
-    try {
-      const { resolvedModel } = resolveOllamaModel(OLLAMA_MODEL);
-      return {
-        client: ollamaClient,
-        backend: { provider: "ollama", model: resolvedModel, fallback_used: false }
-      };
-    } catch (error) {
-      console.warn('Ollama model validation failed:', error instanceof Error ? error.message : error);
-    }
-  }
-
-  if (openAiAvailable) {
-    return {
-      client: openAiClient,
-      backend: { provider: "openai", model: MODEL_NAME, fallback_used: false }
-    };
-  }
-
-  throw new Error("No AI backend configured. Please set OPENAI_API_KEY or enable Ollama.");
+  return { candidates, classification, policy };
 }
 
 async function createCompletion(messages: Array<{ role: "system" | "user"; content: string }>, client: any): Promise<CompletionResult> {
@@ -931,7 +1417,6 @@ async function createCompletion(messages: Array<{ role: "system" | "user"; conte
   }
 
   if (client === ollamaClient) {
-    // Use Ollama
     if (!ollamaClient) {
       throw new Error("Ollama client not available.");
     }
@@ -972,33 +1457,58 @@ async function createCompletion(messages: Array<{ role: "system" | "user"; conte
     };
   }
 
-  if (client === openAiClient) {
-    // Use OpenAI
-    if (!openAiClient) {
-      throw new Error("OpenAI client not available.");
+  if (client === geminiClient) {
+    if (!geminiClient) {
+      throw new Error("Gemini client not available.");
     }
-    const completion = await openAiClient.chat.completions.create({
-      model: MODEL_NAME,
-      messages,
-      temperature: 0.2,
-      max_tokens: 900,
+
+    const model = geminiClient.getGenerativeModel({
+      model: GEMINI_MODEL,
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 900,
+      },
     });
 
-    const content = completion.choices?.[0]?.message?.content;
+    const prompt = messages.map(msg => {
+      if (msg.role === "system") return `System: ${msg.content}`;
+      if (msg.role === "user") return `User: ${msg.content}`;
+      return msg.content;
+    }).join("\n\n");
+
+    const completion = await model.generateContent(prompt);
+    const content = completion.response.text();
     if (!content) {
-      throw new Error("OpenAI returned an empty completion.");
+      throw new Error("Gemini returned an empty completion.");
     }
 
-    const tokens = completion.usage?.total_tokens ?? 0;
-    const model = typeof completion.model === "string" ? completion.model : MODEL_NAME;
+    const tokens = Math.ceil(content.length / 4);
 
-    return { content, tokens, model };
+    return { content, tokens, model: GEMINI_MODEL };
   }
 
   throw new Error("Unsupported AI client.");
 }
 
-export async function promptToSpec(prompt: string, context?: string, preferredBackend: string = "auto", strictJson: boolean = false): Promise<CompletionResult & { spec: NormalizedSpec; ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean } }> {
+function withCompletionTimeout<T>(promise: Promise<T>, backend: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`${backend} completion timed out after ${AI_COMPLETION_TIMEOUT_MS}ms`));
+    }, AI_COMPLETION_TIMEOUT_MS);
+
+    promise
+      .then((value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+  });
+}
+
+export async function promptToSpec(prompt: string, context?: string, preferredBackend: string = "auto", strictJson: boolean = false): Promise<CompletionResult & { spec: NormalizedSpec; ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean }; confidence: ConfidenceReport }> {
   const createUserPrompt = (attempt: number, previousErrors: string[]) => {
     const basePrompt = [`Raw prompt:\n${prompt}`];
     if (context?.trim()) {
@@ -1050,7 +1560,7 @@ No explanations, no markdown, just the JSON object.`;
       taskInstruction = `Handle the following user request: ${normalizedPrompt}`;
     }
 
-    const inputFields: Record<string, unknown> = {};
+    const inputFields: Record<string, any> = {};
 
     // Always include primary input
     if (lowerPrompt.includes('code')) {
@@ -1086,7 +1596,7 @@ No explanations, no markdown, just the JSON object.`;
       };
     }
 
-    const outputFields: Record<string, unknown> = {};
+    const outputFields: Record<string, any> = {};
 
     // Infer output based on prompt
     if (lowerPrompt.includes('analyze') || lowerPrompt.includes('review')) {
@@ -1125,142 +1635,196 @@ No explanations, no markdown, just the JSON object.`;
     };
   };
 
-  const { client, backend } = selectBackend(preferredBackend);
+  const trace = createTraceContext();
+  const semanticHit = semanticSpecCache.get(prompt);
+  if (semanticHit) {
+    logEvent("info", "semantic_cache_hit", {
+      similarity: Number(semanticHit.similarity.toFixed(2)),
+      cache_key: semanticHit.entry.key,
+    }, trace);
+    return {
+      content: JSON.stringify(semanticHit.entry.value),
+      tokens: 0,
+      model: "semantic-cache",
+      spec: semanticHit.entry.value,
+      ai_backend: { provider: "semantic_cache", model: "semantic-cache", fallback_used: true },
+      json_validation: { is_valid: true, attempts: 1, auto_fixed: false },
+      confidence: {
+        classification: 9,
+        schema_match: 9,
+        semantic_alignment: 9,
+        ai_stability: 10,
+        provider_reliability: 10,
+        template_alignment: 9,
+        validation_confidence: 9,
+      }
+    };
+  }
+
+  const { candidates, classification, policy } = selectBackend(preferredBackend, prompt);
+  incrementMetric("routing_requests");
+  logEvent("info", "prompt_classified", {
+    prompt_type: classification.prompt_type,
+    semantic_intent: classification.semantic_intent,
+    complexity_score: classification.complexity_score,
+    risk_level: classification.risk_level,
+    routing_recommendation: classification.routing_recommendation,
+    policy_provider: policy.provider,
+    min_confidence: policy.minConfidence,
+  }, trace);
+  logEvent("info", "backend_selected", {
+    selected_backend: candidates[0]?.backend.provider ?? "local_fallback",
+    candidate_backends: candidates.map((candidate) => candidate.backend.provider),
+    prompt_type: classification.prompt_type,
+  }, trace);
+
+  const composition = resolveTemplateComposition(prompt, classification);
+  const template = composition.composed;
+  const fallbackPlan = createDeterministicPlan({
+    intent: classification.semantic_intent,
+    requiredInputs: template.inputs,
+    requiredOutputs: template.outputs,
+    riskLevel: classification.risk_level,
+    suggestedTemplate: template.id,
+  });
+  logEvent("info", "template_selected", {
+    template_id: template.id,
+    template_version: template.version,
+    composed_templates: composition.templates.map((item) => item.id),
+    conflicts: composition.conflicts,
+  }, trace);
 
   let lastError = "";
   let rawAiResponse = "";
   let parsedSpec: unknown = null;
   let jsonValidation = { is_valid: false, attempts: 0, auto_fixed: false };
 
-  for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
-    try {
-      const completion = await createCompletion([
-        { role: "system", content: SYSTEM_INSTRUCTION },
-        { role: "user", content: createUserPrompt(attempt, [lastError]).trim() },
-      ], client);
+  for (const candidate of candidates) {
+    const { client, backend } = candidate;
 
-      rawAiResponse = completion.content;
-      console.debug("AI response", {
-        attempt,
-        ai_response: rawAiResponse,
-        backend: backend.provider,
-        model: completion.model,
-      });
-
+    for (let attempt = 1; attempt <= Math.max(MAX_GENERATION_ATTEMPTS, policy.retries); attempt += 1) {
+      const attemptStartedAt = Date.now();
       try {
-        let parseResult = parseJson<unknown>(completion.content);
-        parsedSpec = parseResult;
-        jsonValidation = { is_valid: true, attempts: 1, auto_fixed: false };
-      } catch (parseError) {
-        const fixed = parseJsonWithRetry<unknown>(completion.content, true);
-        parsedSpec = fixed.parsed;
-        jsonValidation = { is_valid: true, attempts: fixed.attempts, auto_fixed: fixed.autoFixed };
-      }
+        const completion = await withCompletionTimeout(createCompletion([
+          { role: "system", content: backend.provider === "gemini" ? GEMINI_PLANNER_INSTRUCTION : SYSTEM_INSTRUCTION },
+          { role: "user", content: createUserPrompt(attempt, [lastError]).trim() },
+        ], client), backend.provider);
+        const latencyMs = Date.now() - attemptStartedAt;
+        observeMetric("provider_latency", latencyMs);
 
-      const validationResult = validateSpec(parsedSpec);
-      if (validationResult.valid) {
-        // Apply learning improvements
-        const baseSpec = parsedSpec as PromptSpec;
-        const { improvedSpec, improvements } = improveWithLearning(baseSpec, prompt);
+        rawAiResponse = completion.content;
+        logEvent("debug", "ai_response_received", {
+          attempt,
+          ai_response: rawAiResponse,
+          backend: backend.provider,
+          prompt_type: backend.prompt_type,
+          model: completion.model,
+        });
 
-        // Enforce quality standards
-        const { spec: finalSpec, qualityScore, appliedFixes } = enforceQualityStandards(improvedSpec, prompt);
-
-        // Check quality threshold
-        if (qualityScore < 8) {
-          console.warn(`Spec quality too low (${qualityScore}), rejecting and retrying`);
-          lastError = `Quality score ${qualityScore} below threshold 8. Applied fixes: ${appliedFixes.join(", ")}`;
-          continue; // Retry
+        try {
+          let parseResult = parseJson<unknown>(completion.content);
+          parsedSpec = parseResult;
+          jsonValidation = { is_valid: true, attempts: 1, auto_fixed: false };
+        } catch (parseError) {
+          const fixed = parseJsonWithRetry<unknown>(completion.content, true);
+          parsedSpec = fixed.parsed;
+          jsonValidation = { is_valid: true, attempts: fixed.attempts, auto_fixed: fixed.autoFixed };
         }
 
-        // Store in history
-        addToHistory({
-          prompt,
-          generated_spec: finalSpec,
-          quality_score: qualityScore,
-          feedback_score: 0, // Will be updated later if feedback provided
-          iterations: attempt,
-          backend_used: backend.provider
-        });
+        const plan = backend.provider === "gemini" ? parsePlanDocument(parsedSpec, fallbackPlan) : fallbackPlan;
+        const baseSpec = backend.provider === "gemini"
+          ? buildSpecFromTemplate(template, prompt, plan.required_inputs, plan.required_outputs)
+          : parsedSpec as PromptSpec;
+        const validationResult = validateSpec(baseSpec);
+        if (validationResult.valid) {
+          const { improvedSpec, improvements } = improveWithLearning(baseSpec, prompt);
+          const { spec: finalSpec, qualityScore, appliedFixes } = enforceQualityStandards(improvedSpec, prompt);
+          const confidence = calculateConfidence({
+            classification,
+            spec: finalSpec,
+            validationIssues: validationResult.issues,
+            templateFields: { inputs: template.inputs, outputs: template.outputs },
+            fallbackUsed: backend.fallback_used,
+            providerReliability: getProviderHealth(backend.provider === "gemini" ? "gemini" : "llama").reliability,
+          });
+          const safety = validateSpecSafety(finalSpec);
 
-        console.debug("Prompt spec generated and improved with learning", {
-          prompt,
-          preferredBackend,
-          strictJson,
-          retryCount: attempt,
-          improvements_applied: improvements,
-          quality_score: qualityScore,
-          quality_fixes: appliedFixes,
-          final_spec: finalSpec,
-        });
+          if (qualityScore < 8) {
+            logEvent("warn", "quality_rejected", { quality_score: qualityScore, backend: backend.provider }, trace);
+            lastError = `Quality score ${qualityScore} below threshold 8. Applied fixes: ${appliedFixes.join(", ")}`;
+            continue;
+          }
 
-        return {
-          ...completion,
-          spec: normalizeSpec(finalSpec),
-          ai_backend: backend,
-          json_validation: jsonValidation
-        };
+          if (confidence.validation_confidence < policy.minConfidence || confidence.schema_match < policy.minConfidence) {
+            incrementMetric("low_confidence_rejections");
+            lastError = `Confidence below policy threshold ${policy.minConfidence}`;
+            logEvent("warn", "quality_rejected", { reason: "low_confidence", confidence, policy }, trace);
+            continue;
+          }
+
+          if (!safety.allowed) {
+            incrementMetric("unsafe_output_blocks");
+            lastError = `Safety validation failed: ${safety.issues.join("; ")}`;
+            logEvent("error", "unsafe_output_blocked", { issues: safety.issues, backend: backend.provider }, trace);
+            continue;
+          }
+
+          addToHistory({
+            prompt,
+            generated_spec: finalSpec,
+            quality_score: qualityScore,
+            feedback_score: 0,
+            iterations: attempt,
+            backend_used: backend.provider
+          });
+
+          const normalizedSpec = normalizeSpec(finalSpec);
+          semanticSpecCache.set(prompt, prompt, normalizedSpec);
+          recordProviderResult(backend.provider === "gemini" ? "gemini" : "llama", true, latencyMs);
+          incrementMetric("routing_success");
+
+          logEvent("debug", "spec_generated", {
+            prompt,
+            preferredBackend,
+            prompt_type: classification.prompt_type,
+            selected_backend: backend.provider,
+            strictJson,
+            retryCount: attempt,
+            improvements_applied: improvements,
+            quality_score: qualityScore,
+            quality_fixes: appliedFixes,
+          }, trace);
+
+          return {
+            ...completion,
+            spec: normalizedSpec,
+            ai_backend: backend,
+            json_validation: jsonValidation,
+            confidence
+          };
+        }
+
+        if (!validationResult.valid && attempt < MAX_GENERATION_ATTEMPTS) {
+          logEvent("warn", "schema_validation_failed", {
+            attempt,
+            issues: validationResult.issues,
+            backend: backend.provider,
+          }, trace);
+          continue;
+        }
+
+        lastError = `Validation failed: ${validationResult.issues.join("; ")}`;
+        logEvent("warn", "retry_attempt", { attempt, reason: lastError, backend: backend.provider }, trace);
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        recordProviderResult(backend.provider === "gemini" ? "gemini" : "llama", false, Date.now() - attemptStartedAt);
+        logEvent("warn", "retry_attempt", { attempt, reason: lastError, backend: backend.provider }, trace);
       }
-
-      // If validation failed and we have attempts left, continue to next attempt
-      if (!validationResult.valid && attempt < MAX_GENERATION_ATTEMPTS) {
-        console.debug(`Attempt ${attempt} validation failed, will retry.`, validationResult.issues);
-        continue;
-      }
-
-      // If validation passed, use this spec
-      if (validationResult.valid) {
-        // Apply learning improvements
-        const baseSpec = parsedSpec as PromptSpec;
-        const { improvedSpec, improvements } = improveWithLearning(baseSpec, prompt);
-
-        // Enforce quality standards
-        const { spec: finalSpec, qualityScore, appliedFixes } = enforceQualityStandards(improvedSpec, prompt);
-
-        // Store in history
-        addToHistory({
-          prompt,
-          generated_spec: finalSpec,
-          quality_score: qualityScore,
-          feedback_score: 0,
-          timestamp: new Date().toISOString(),
-          iterations: attempt,
-          backend_used: backend.provider
-        });
-
-        return {
-          ...completion,
-          spec: normalizeSpec(finalSpec),
-          ai_backend: backend,
-          json_validation: jsonValidation
-        };
-      }
-
-      // Validation failed and no more attempts
-      lastError = `Validation failed: ${validationResult.issues.join("; ")}`;
-      console.warn(`Attempt ${attempt} failed validation.`, lastError);
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      console.warn(`Attempt ${attempt} failed to produce a valid spec.`, lastError);
     }
   }
 
   // Fast deterministic fallback - no AI calls, no complex processing
-  const fallbackSpec: PromptSpec = {
-    task_instruction: "Process user requests with structured input and output",
-    input_fields: {
-      user_input: {
-        type: "string",
-        description: "The user's input data or request"
-      }
-    },
-    output_fields: {
-      result: {
-        type: "string",
-        description: "The processed result or response"
-      }
-    }
-  };
+  const fallbackSpec: PromptSpec = buildSpecFromTemplate(template, prompt, fallbackPlan.required_inputs, fallbackPlan.required_outputs);
 
   // Apply learning to fallback
   const { improvedSpec: learnedFallbackSpec, improvements: learningImprovements } = improveWithLearning(fallbackSpec, prompt);
@@ -1268,7 +1832,18 @@ No explanations, no markdown, just the JSON object.`;
   // Enforce quality standards on fallback
   const { spec: qualityEnforcedFallback, qualityScore, appliedFixes } = enforceQualityStandards(learnedFallbackSpec, prompt);
 
-  console.warn("Falling back to context-aware prompt spec after retries.", {
+  const fallbackConfidence = calculateConfidence({
+    classification,
+    spec: qualityEnforcedFallback,
+    validationIssues: [],
+    templateFields: { inputs: template.inputs, outputs: template.outputs },
+    fallbackUsed: true,
+    providerReliability: getProviderHealth("fallback").reliability,
+  });
+  incrementMetric("fallback_rate");
+  recordProviderResult("fallback", true, 0);
+
+  logEvent("warn", "fallback_triggered", {
     prompt,
     preferredBackend,
     strictJson,
@@ -1277,7 +1852,7 @@ No explanations, no markdown, just the JSON object.`;
     fallback_spec: qualityEnforcedFallback,
     learning_improvements: learningImprovements,
     quality_fixes: appliedFixes,
-  });
+  }, trace);
 
   // Store fallback in history
   addToHistory({
@@ -1292,7 +1867,7 @@ No explanations, no markdown, just the JSON object.`;
   // Final safety net: ensure fallback is valid
   const fallbackValidation = validateSpec(qualityEnforcedFallback);
   if (!fallbackValidation.valid) {
-    console.error("Quality enforced fallback spec failed validation, using hardcoded valid spec.", fallbackValidation.issues);
+    logEvent("error", "schema_validation_failed", { fallback: "hardcoded", issues: fallbackValidation.issues });
     const hardcodedSpec: PromptSpec = {
       task_instruction: "Process user requests with structured input and output",
       input_fields: {
@@ -1316,19 +1891,38 @@ No explanations, no markdown, just the JSON object.`;
       content: JSON.stringify(hardcodedSpec),
       tokens: 0,
       model: "fallback",
-      spec: hardcodedSpec,
-      ai_backend: { provider: "fallback", model: "fallback", fallback_used: true },
-      json_validation: { is_valid: true, attempts: 1, auto_fixed: false }
+      spec: normalizeSpec(hardcodedSpec),
+      ai_backend: {
+        provider: "fallback",
+        model: "fallback",
+        fallback_used: true,
+        prompt_type: classification.prompt_type,
+        semantic_intent: classification.semantic_intent,
+        risk_level: classification.risk_level,
+      },
+      json_validation: { is_valid: true, attempts: 1, auto_fixed: false },
+      confidence: fallbackConfidence
     };
   }
+
+  const normalizedFallbackSpec = normalizeSpec(qualityEnforcedFallback);
+  semanticSpecCache.set(prompt, prompt, normalizedFallbackSpec);
 
   return {
     content: JSON.stringify(qualityEnforcedFallback),
     tokens: 0,
     model: "fallback",
-    spec: normalizeSpec(qualityEnforcedFallback),
-    ai_backend: { provider: "fallback", model: "fallback", fallback_used: true },
-    json_validation: { is_valid: true, attempts: 1, auto_fixed: false }
+    spec: normalizedFallbackSpec,
+    ai_backend: {
+      provider: "fallback",
+      model: "fallback",
+      fallback_used: true,
+      prompt_type: classification.prompt_type,
+      semantic_intent: classification.semantic_intent,
+      risk_level: classification.risk_level,
+    },
+    json_validation: { is_valid: true, attempts: 1, auto_fixed: false },
+    confidence: fallbackConfidence
   };
 }
 
@@ -1344,17 +1938,21 @@ export function validateSpec(spec: unknown): { valid: boolean; issues: string[] 
   }
 }
 
-type OpenAIImprovementResult = {
+type AiImprovementResult = {
   prompt_spec: PromptSpec;
   improvements_applied: string;
 };
 
-export async function improveSpec(spec: unknown, issues: string[] = [], context?: string, preferredBackend: "ollama" | "openai" | "auto" = "auto", strictJson: boolean = false): Promise<OpenAIImprovementResult & CompletionResult & { ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean } }> {
-  const { client, backend } = selectBackend(preferredBackend);
+export async function improveSpec(spec: unknown, issues: string[] = [], context?: string, preferredBackend: "llama" | "ollama" | "gemini" | "auto" = "auto", strictJson: boolean = false): Promise<AiImprovementResult & CompletionResult & { ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean } }> {
+  const routingPrompt = [context, ...issues].filter(Boolean).join("\n");
+  const { candidates } = selectBackend(preferredBackend, routingPrompt);
+  const candidate = candidates[0];
 
-  if (!client) {
-    throw new Error("No AI backend configured for improvements. Please set OPENAI_API_KEY or enable Ollama.");
+  if (!candidate) {
+    throw new Error("No AI backend configured for improvements. Please set GEMINI_API_KEY or enable Ollama.");
   }
+
+  const { client, backend } = candidate;
 
   const safeSpec = typeof spec === "string" ? { raw_spec: spec } : spec;
   const problemSummary = issues.length > 0 ? issues.join("\n") : "No explicit validation issues were provided.";
@@ -1362,15 +1960,15 @@ export async function improveSpec(spec: unknown, issues: string[] = [], context?
   let completion: CompletionResult;
 
   try {
-    completion = await createCompletion([
+    completion = await withCompletionTimeout(createCompletion([
       { role: "system", content: IMPROVEMENT_INSTRUCTION },
       {
         role: "user",
         content: `Current spec: ${JSON.stringify(safeSpec, null, 2)}\n\nValidation issues:\n${problemSummary}`,
       },
-    ], client);
+    ], client), backend.provider);
   } catch (error) {
-    console.warn("AI improvement call failed, using valid fallback improvement.", error instanceof Error ? error.message : error);
+    logEvent("warn", "fallback_triggered", { stage: "improve_spec", reason: error instanceof Error ? error.message : String(error) });
     const promptSpecValidation = promptSpecSchema.safeParse(spec);
     const validFallbackSpec: PromptSpec = promptSpecValidation.success && validateSpec(promptSpecValidation.data).valid
       ? promptSpecValidation.data
@@ -1413,11 +2011,11 @@ export async function improveSpec(spec: unknown, issues: string[] = [], context?
   }
 
   // Parse the completion with strict JSON validation if requested
-  let parsed: OpenAIImprovementResult;
+  let parsed: AiImprovementResult;
   let jsonValidation: { is_valid: boolean; attempts: number; auto_fixed: boolean };
 
   if (strictJson) {
-    const jsonResult = parseJsonWithRetry<OpenAIImprovementResult>(completion.content, true);
+    const jsonResult = parseJsonWithRetry<AiImprovementResult>(completion.content, true);
     parsed = jsonResult.parsed;
     jsonValidation = {
       is_valid: true,
@@ -1425,7 +2023,7 @@ export async function improveSpec(spec: unknown, issues: string[] = [], context?
       auto_fixed: jsonResult.autoFixed
     };
   } else {
-    parsed = parseJson<OpenAIImprovementResult>(completion.content);
+    parsed = parseJson<AiImprovementResult>(completion.content);
     jsonValidation = { is_valid: true, attempts: 1, auto_fixed: false };
   }
 
@@ -1459,6 +2057,7 @@ export function toSnakeCase(str: string): string {
 
 export function normalizeFieldName(name: string): string {
   const snakeCase = toSnakeCase(name);
+  if (isCanonicalField(snakeCase)) return snakeCase;
   // Ensure it's a valid identifier and not too generic
   if (snakeCase.length < 3) return `field_${snakeCase}`;
   if (['result', 'output', 'data', 'value', 'response'].includes(snakeCase)) {
@@ -1467,34 +2066,102 @@ export function normalizeFieldName(name: string): string {
   return snakeCase;
 }
 
-export function normalizeInputFields(fields: Record<string, any>): Record<string, { type: string; description: string }> {
-  const normalized: Record<string, { type: string; description: string }> = {};
+function normalizeFieldType(type: string): string {
+  const validTypes = ['string', 'number', 'boolean', 'object', 'array'];
+  return validTypes.includes(type.toLowerCase()) ? type.toLowerCase() : 'string';
+}
 
-  for (const [key, value] of Object.entries(fields)) {
+function generateFieldDescription(fieldName: string): string {
+  const descriptions: Record<string, string> = {
+    code_snippet: 'The code snippet or program to be processed',
+    language: 'Programming language of the code',
+    component_name: 'Name of the UI component',
+    props: 'Component properties and configuration',
+    endpoint: 'API endpoint URL',
+    method: 'HTTP method',
+    payload: 'Request payload or parameters',
+    data_source: 'Source of the data to process',
+    query: 'Query or operation to perform',
+    results: 'Query results or processed data',
+    content: 'Text content to process or generate',
+    parameters: 'Processing parameters and options',
+    response_schema: 'Expected response structure',
+    status_codes: 'Possible HTTP status codes and meanings'
+  };
+
+  return descriptions[fieldName] || `The ${fieldName.replace(/_/g, ' ')} for this operation`;
+}
+
+export function normalizeInputFields(fields: Record<string, any>): Record<string, any> {
+  const normalized: Record<string, any> = {};
+
+  Object.entries(fields).forEach(([key, field]) => {
     const normalizedKey = normalizeFieldName(key);
-    const type = typeof value.type === 'string' ? value.type : 'string';
-    const description = typeof value.description === 'string' ? value.description : `Input field: ${normalizedKey}`;
-
-    normalized[normalizedKey] = {
-      type: type.toLowerCase(),
-      description: description.trim()
+    const normalizedField: any = {
+      type: normalizeFieldType(field?.type || 'string'),
+      description: field?.description || generateFieldDescription(normalizedKey)
     };
-  }
+
+    // Preserve enriched structures if present
+    if (field?.properties) {
+      normalizedField.properties = field.properties;
+    }
+    if (field?.items) {
+      normalizedField.items = field.items;
+    }
+
+    normalized[normalizedKey] = normalizedField;
+  });
 
   return normalized;
 }
 
-export function normalizeOutputFields(fields: Record<string, any>): Record<string, { type: string; description: string }> {
-  const normalized: Record<string, { type: string; description: string }> = {};
+export function normalizeOutputFields(fields: Record<string, any>): Record<string, any> {
+  const normalized: Record<string, any> = {};
 
-  for (const [key, value] of Object.entries(fields)) {
+  Object.entries(fields).forEach(([key, field]) => {
     const normalizedKey = normalizeFieldName(key);
-    const type = typeof value.type === 'string' ? value.type : 'string';
-    const description = typeof value.description === 'string' ? value.description : `Output field: ${normalizedKey}`;
+    const type = normalizeFieldType(field?.type || 'string');
 
-    normalized[normalizedKey] = {
-      type: type.toLowerCase(),
-      description: description.trim()
+    // Preserve enriched structures (properties, items) if present
+    let normalizedField: any = {
+      type,
+      description: field?.description || generateFieldDescription(normalizedKey)
+    };
+
+    // Preserve nested properties for enriched specs
+    if (field?.properties) {
+      normalizedField.properties = field.properties;
+    }
+    if (field?.items) {
+      normalizedField.items = field.items;
+    }
+    if (field?.enum) {
+      normalizedField.enum = field.enum;
+    }
+    if (field?.required) {
+      normalizedField.required = field.required;
+    }
+
+    normalized[normalizedKey] = normalizedField;
+  });
+
+  // Ensure at least one structured output if empty
+  const hasStructured = Object.values(normalized).some((field: any) => field.type === 'object' || field.type === 'array');
+  if (Object.keys(normalized).length === 0 || !hasStructured) {
+    normalized.structured_result = {
+      type: 'object',
+      description: 'Structured result containing all processing outputs',
+      properties: {
+        data: {
+          type: 'object',
+          description: 'The main structured data result'
+        },
+        metadata: {
+          type: 'object',
+          description: 'Metadata about the processing operation'
+        }
+      }
     };
   }
 
@@ -1519,7 +2186,7 @@ export interface NormalizedSpec {
   task_instruction: string;
   input_fields: Record<string, { type: string; description: string }>;
   output_fields: Record<string, { type: string; description: string }>;
-  metadata: {
+  metadata?: {
     normalized_at: string;
     original_field_count: { input: number; output: number };
     field_name_changes: Record<string, string>;
@@ -1604,6 +2271,9 @@ export function validateConsistency(spec: NormalizedSpec): { valid: boolean; iss
       issues.push(`Output field '${key}' missing type or description`);
     }
   }
+
+  issues.push(...validateSchemaCompatibility(spec.input_fields));
+  issues.push(...validateSchemaCompatibility(spec.output_fields));
 
   // Check for generic field names
   const genericNames = ['result', 'output', 'data', 'value', 'response'];

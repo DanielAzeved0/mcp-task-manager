@@ -290,9 +290,10 @@
 
             const getBackendBadgeColor = (backend) => {
                 switch (backend) {
+                    case "llama": return "#10b981";
                     case "ollama": return "#10b981";
-                    case "openai": return "#3b82f6";
-                    case "mock": return "#6b7280";
+                    case "gemini": return "#3b82f6";
+                    case "fallback": return "#6b7280";
                     default: return "#6b7280";
                 }
             };
@@ -492,8 +493,8 @@
                                 }
                             }, [
                                 React.createElement("option", { key: "auto", value: "auto" }, "Auto (Recomendado)"),
-                                React.createElement("option", { key: "ollama", value: "ollama" }, "Ollama (Local)"),
-                                React.createElement("option", { key: "openai", value: "openai" }, "OpenAI (Cloud)")
+                                React.createElement("option", { key: "llama", value: "llama" }, "Llama (Ollama Local)"),
+                                React.createElement("option", { key: "gemini", value: "gemini" }, "Gemini (Cloud)")
                             ])
                         ]),
 

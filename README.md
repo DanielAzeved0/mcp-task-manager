@@ -32,15 +32,15 @@ npm install
 
 ### Configuração da IA
 
-Este projeto suporta dois backends de IA:
+Este projeto suporta uma arquitetura hibrida com Gemini e Llama local:
 
-#### Opção 1: OpenAI (Recomendado)
+#### Opção 1: Gemini (Cloud)
 ```bash
 cp .env.example .env
-# Edite .env e adicione sua OPENAI_API_KEY
+# Edite .env e adicione sua GEMINI_API_KEY
 ```
 
-#### Opção 2: Ollama (Local e Gratuito)
+#### Opção 2: Llama via Ollama (Local e Gratuito)
 ```bash
 # 1. Instale Ollama: https://ollama.ai/download
 # 2. Baixe um modelo: ollama pull llama3.2
@@ -71,7 +71,7 @@ Parâmetros de entrada:
 - `strict_mode`: Modo rigoroso para validação (opcional)
 - `min_quality_score`: Pontuação mínima aceitável (opcional)
 - `use_cache`: Habilitar cache (opcional)
-- `preferred_backend`: Backend preferido: "auto", "ollama", ou "openai" (opcional)
+- `preferred_backend`: Backend preferido: "auto", "llama", "ollama", ou "gemini" (opcional)
 - `user_id`: ID do usuário (obrigatório)
 - `team_id`: ID do time (opcional)
 
@@ -87,12 +87,12 @@ curl -X POST http://localhost:3000/prompt-to-spec \
   "user_id": "user123"
 }'
 
-# Usar OpenAI
+# Usar Gemini
 curl -X POST http://localhost:3000/prompt-to-spec \
 -H "Content-Type: application/json" \
 -d '{
   "prompt": "crie uma função para somar dois números",
-  "preferred_backend": "openai",
+  "preferred_backend": "gemini",
   "user_id": "user123"
 }'
 

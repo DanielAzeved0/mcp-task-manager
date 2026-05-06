@@ -6,23 +6,27 @@ export const promptRequestSchema = z.object({
   strict_mode: z.boolean().optional(),
   min_quality_score: z.number().min(0).max(10).optional(),
   use_cache: z.boolean().optional(),
-  preferred_backend: z.enum(["ollama", "openai", "auto"]).optional(),
+  preferred_backend: z.enum(["llama", "ollama", "gemini", "auto"]).optional(),
   strict_json: z.boolean().optional(),
   feedback_score: z.number().min(0).max(10).optional(),
   user_id: z.string().trim().min(1, "user_id is required"),
   team_id: z.string().optional(),
 });
 
+// Flexible field definition that allows nested properties and items for enriched specs
+const fieldDefinition = z.object({
+  type: z.string(),
+  description: z.string(),
+  properties: z.record(z.string(), z.any()).optional(),
+  items: z.any().optional(),
+  enum: z.array(z.any()).optional(),
+  required: z.array(z.string()).optional()
+}).passthrough();
+
 export const promptSpecSchema = z.object({
   task_instruction: z.string().trim().min(1),
-  input_fields: z.record(z.string(), z.object({
-    type: z.string(),
-    description: z.string()
-  })),
-  output_fields: z.record(z.string(), z.object({
-    type: z.string(),
-    description: z.string()
-  })),
+  input_fields: z.record(z.string(), fieldDefinition),
+  output_fields: z.record(z.string(), fieldDefinition),
   metadata: z.object({
     normalized_at: z.string(),
     original_field_count: z.object({
@@ -30,7 +34,7 @@ export const promptSpecSchema = z.object({
       output: z.number()
     }),
     field_name_changes: z.record(z.string(), z.string())
-  })
+  }).optional()
 });
 
 export const promptValidationSchema = z.object({
@@ -85,6 +89,19 @@ export const promptAiBackendSchema = z.object({
   provider: z.string(),
   model: z.string(),
   fallback_used: z.boolean(),
+  prompt_type: z.enum(["simple", "medium", "complex", "critical"]).optional(),
+  semantic_intent: z.string().optional(),
+  risk_level: z.string().optional(),
+});
+
+export const promptConfidenceSchema = z.object({
+  classification: z.number().min(0).max(10),
+  schema_match: z.number().min(0).max(10),
+  semantic_alignment: z.number().min(0).max(10),
+  ai_stability: z.number().min(0).max(10),
+  provider_reliability: z.number().min(0).max(10),
+  template_alignment: z.number().min(0).max(10),
+  validation_confidence: z.number().min(0).max(10),
 });
 
 export const promptFallbackSchema = z.object({
@@ -107,6 +124,7 @@ export const promptResponseSchema = z.object({
   performance: promptPerformanceSchema,
   json_validation: promptJsonValidationSchema,
   ai_backend: promptAiBackendSchema,
+  confidence: promptConfidenceSchema.optional(),
   fallback: promptFallbackSchema,
   cache: promptCacheSchema,
   versioning: promptVersioningSchema,

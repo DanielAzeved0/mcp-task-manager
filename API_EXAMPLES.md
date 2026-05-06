@@ -91,12 +91,12 @@ A API agora retorna informações detalhadas sobre qual backend de IA foi usado:
 }
 ```
 
-### 2. OpenAI (Remoto)
+### 2. Gemini (Remoto)
 ```json
 {
   "ai_backend": {
-    "provider": "openai",
-    "model": "gpt-4o-mini",
+    "provider": "gemini",
+    "model": "gemini-1.5-flash",
     "fallback_used": false
   },
   "fallback": {
@@ -126,9 +126,9 @@ A API agora retorna informações detalhadas sobre qual backend de IA foi usado:
 A API usa a seguinte lógica para escolher o backend:
 
 1. **preferred_backend: "ollama"** → Usa Ollama se disponível
-2. **preferred_backend: "openai"** → Usa OpenAI se disponível
-3. **preferred_backend: "auto"** (padrão) → Prioriza Ollama, depois OpenAI
-4. **Fallback** → Mock se nenhum backend estiver disponível
+2. **preferred_backend: "gemini"** → Usa Gemini se disponível
+3. **preferred_backend: "auto"** (padrão) → Usa Llama para prompts simples e Gemini para prompts complexos
+4. **Fallback** → Gera uma especificação local determinística se nenhum backend estiver disponível
 
 ## Monitoramento
 

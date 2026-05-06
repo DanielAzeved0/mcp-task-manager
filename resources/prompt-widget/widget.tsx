@@ -4,7 +4,7 @@ import React, { useState } from "react";
 
 const propsSchema = z.object({
   apiEndpoint: z.string().optional(),
-  defaultBackend: z.enum(["auto", "ollama", "openai"]).optional(),
+  defaultBackend: z.enum(["auto", "llama", "ollama", "gemini"]).optional(),
   defaultStrictMode: z.boolean().optional(),
 });
 
@@ -38,7 +38,7 @@ const PromptWidget: React.FC = () => {
   const isDark = theme === "dark";
 
   const [prompt, setPrompt] = useState("");
-  const [preferredBackend, setPreferredBackend] = useState<"auto" | "ollama" | "openai">(
+  const [preferredBackend, setPreferredBackend] = useState<"auto" | "llama" | "ollama" | "gemini">(
     props?.defaultBackend || "auto"
   );
   const [strictMode, setStrictMode] = useState(props?.defaultStrictMode || false);
@@ -205,7 +205,7 @@ const PromptWidget: React.FC = () => {
               </label>
               <select
                 value={preferredBackend}
-                onChange={(e) => setPreferredBackend(e.target.value as "auto" | "ollama" | "openai")}
+                onChange={(e) => setPreferredBackend(e.target.value as "auto" | "llama" | "ollama" | "gemini")}
                 style={{
                   width: "100%",
                   padding: 12,
@@ -218,8 +218,8 @@ const PromptWidget: React.FC = () => {
                 }}
               >
                 <option value="auto">Auto (Recommended)</option>
-                <option value="ollama">Ollama (Local)</option>
-                <option value="openai">OpenAI (Cloud)</option>
+                <option value="llama">Llama (Ollama Local)</option>
+                <option value="gemini">Gemini (Cloud)</option>
               </select>
             </div>
 

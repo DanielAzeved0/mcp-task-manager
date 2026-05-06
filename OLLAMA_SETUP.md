@@ -1,6 +1,6 @@
 # Configuração Ollama
 
-Este projeto agora suporta tanto OpenAI quanto Ollama como backend de IA.
+Este projeto usa Ollama como backend local de Llama dentro do roteador hibrido Gemini/Llama.
 
 ## 🚀 Usando Ollama (Local e Gratuito)
 
@@ -69,9 +69,9 @@ Por padrão, Ollama roda na porta 11434. Se você mudou, configure:
 OLLAMA_HOST=http://localhost:11434
 ```
 
-## 🆚 Comparação: OpenAI vs Ollama
+## Comparação: Gemini vs Ollama
 
-| Aspecto | OpenAI | Ollama |
+| Aspecto | Gemini | Ollama |
 |---------|--------|--------|
 | Custo | Pago | Gratuito |
 | Velocidade | Muito rápida | Depende do hardware |

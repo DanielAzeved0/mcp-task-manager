@@ -8,8 +8,10 @@ import fs from "fs/promises";
 import { promptRequestSchema, promptResponseSchema } from "./schemas/promptSpec.js";
 import { promptToSpec, validateSpec, improveSpec, calculateQuality } from "./services/promptSpecService.js";
 import { ZodError } from "zod";
+import { logEvent } from "./observability/logger.js";
+import { getMetricsSnapshot } from "./observability/metrics.js";
 
-console.log("Starting MCP Prompt Spec API...");
+logEvent("info", "server_starting", { service: "MCP Prompt Spec API" });
 
 const app = express();
 const preferredPort = Number(process.env.PORT) || Number(process.env.PREFERRED_PORT) || 3000;
@@ -47,12 +49,12 @@ async function findAvailablePort(startPort: number, fallbackList: number[]) {
     if (triedPorts.has(candidate)) continue;
     triedPorts.add(candidate);
     attempts.push(candidate);
-    console.log(`Checking port ${candidate} for availability...`);
+    logEvent("debug", "port_check_started", { port: candidate });
 
     try {
       const available = await isPortAvailable(candidate);
       if (available) {
-        console.log(`Selected available port ${candidate}`);
+        logEvent("info", "port_selected", { port: candidate });
         return { selectedPort: candidate, attempts, errors };
       }
       errors.push(`Port ${candidate} unavailable`);
@@ -78,9 +80,9 @@ interface BackendConfigFile {
 async function writeBackendConfig(config: BackendConfigFile) {
   try {
     await fs.writeFile(backendConfigPath, JSON.stringify(config, null, 2), "utf-8");
-    console.log(`Backend config written to ${backendConfigPath}`);
+    logEvent("info", "backend_config_written", { path: backendConfigPath });
   } catch (error) {
-    console.warn("Unable to write backend config file:", error);
+    logEvent("warn", "backend_config_write_failed", { reason: error instanceof Error ? error.message : String(error) });
   }
 }
 
@@ -109,16 +111,16 @@ async function startServer() {
     });
 
     app.listen(selectedPort, () => {
-      console.log(`Prompt Spec API listening on http://localhost:${selectedPort}`);
-      console.log(JSON.stringify({
+      logEvent("info", "server_listening", {
+        url: `http://localhost:${selectedPort}`,
         port_attempts: startup.port_attempts,
         selected_port: startup.selected_port,
         startup_errors: startup.startup_errors,
-      }));
+      });
     });
   } catch (error) {
     startup.startup_errors.push(error instanceof Error ? error.message : String(error));
-    console.error("Failed to start backend:", startup.startup_errors);
+    logEvent("error", "server_start_failed", { startup_errors: startup.startup_errors });
     process.exit(1);
   }
 }
@@ -262,6 +264,7 @@ app.post("/prompt-to-spec", async (req: Request, res: Response, next: NextFuncti
     let currentSpec = initialResult.spec;
     let currentAiBackend = initialResult.ai_backend;
     let currentJsonValidation = initialResult.json_validation;
+    let currentConfidence = initialResult.confidence;
 
     let validationResult = validateSpec(currentSpec);
     let iterations = 1;
@@ -282,6 +285,7 @@ app.post("/prompt-to-spec", async (req: Request, res: Response, next: NextFuncti
       modelUsed = improved.model;
       currentAiBackend = improved.ai_backend;
       currentJsonValidation = improved.json_validation;
+      currentConfidence = initialResult.confidence;
       iterations += 1;
       qualityScore = calculateQuality(validationResult.valid, iterations);
     }
@@ -326,6 +330,7 @@ app.post("/prompt-to-spec", async (req: Request, res: Response, next: NextFuncti
         model_used: modelUsed,
       },
       ai_backend: currentAiBackend,
+      confidence: currentConfidence,
       fallback: {
         used_fallback: currentAiBackend.fallback_used,
         fallback_type: currentAiBackend.fallback_used ? "mock" : "none",
@@ -383,6 +388,10 @@ app.get("/backend-config", (req: Request, res: Response) => {
     server_status: activePort ? "running" : "starting",
     connection_status: activePort ? "connected" : "disconnected",
   });
+});
+
+app.get("/metrics", (req: Request, res: Response) => {
+  res.json(getMetricsSnapshot());
 });
 
 app.use((req: Request, res: Response) => {

@@ -5,7 +5,7 @@ Um widget React interativo para converter prompts em linguagem natural em Especi
 ## 📋 Características
 
 - **Interface Intuitiva**: Formulário simples com entrada de texto para prompts
-- **Seleção de Backend**: Escolha entre Auto, Ollama (local) ou OpenAI (nuvem)
+- **Seleção de Backend**: Escolha entre Auto, Llama/Ollama (local) ou Gemini (nuvem)
 - **Modo Estrito**: Toggle para validação rigorosa de JSON com correção automática
 - **Resultados Detalhados**: Exibe resposta completa da API, status, backend usado e métricas de performance
 - **Validação JSON**: Mostra tentativas de correção automática quando ativado
@@ -22,7 +22,7 @@ Um widget React interativo para converter prompts em linguagem natural em Especi
 
 ### `preferred_backend`
 - **Tipo**: `string`
-- **Opções**: `"auto"`, `"ollama"`, `"openai"`
+- **Opções**: `"auto"`, `"llama"`, `"ollama"`, `"gemini"`
 - **Padrão**: `"auto"`
 - **Descrição**: Seleciona o backend de IA preferido
 
@@ -59,9 +59,9 @@ npm install
 ### 2. Configuração da IA
 Configure um dos backends suportados:
 
-**OpenAI:**
+**Gemini:**
 ```bash
-# Adicione OPENAI_API_KEY ao .env
+# Adicione GEMINI_API_KEY ao .env
 ```
 
 **Ollama (Local):**
@@ -98,7 +98,7 @@ import PromptWidget from './resources/prompt-widget/widget.tsx';
 ```typescript
 interface PromptWidgetProps {
   apiEndpoint?: string;        // URL da API (padrão: localhost:3000)
-  defaultBackend?: "auto" | "ollama" | "openai";  // Backend padrão
+  defaultBackend?: "auto" | "llama" | "ollama" | "gemini";  // Backend padrão
   defaultStrictMode?: boolean; // Modo estrito padrão
 }
 ```
@@ -140,7 +140,7 @@ interface PromptWidgetProps {
 - Digite um prompt válido no campo de texto
 
 **Erro: "No AI client available"**
-- Configure OPENAI_API_KEY ou USE_OLLAMA=true
+- Configure GEMINI_API_KEY ou USE_OLLAMA=true
 
 **JSON malformado no modo estrito**
 - O sistema tenta corrigir automaticamente até 3 vezes
