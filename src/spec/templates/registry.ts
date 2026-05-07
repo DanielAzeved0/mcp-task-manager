@@ -5,6 +5,7 @@ export type TemplateId =
   | "frontend_component"
   | "api_design"
   | "architecture_design"
+  | "code_analysis"
   | "code_refactor"
   | "observability_analysis"
   | "database_design"
@@ -32,7 +33,7 @@ export const TEMPLATE_REGISTRY: Record<TemplateId, SpecTemplate> = {
     version: "1.0.0",
     intents: ["security_analysis"],
     inputs: ["code", "language", "threat_model"],
-    outputs: ["vulnerabilities", "severity", "remediation", "risk_summary"],
+    outputs: ["vulnerabilities", "severity", "remediation", "risk_summary", "auth_requirements", "observability"],
     contract: {
       task_instruction: "Analyze security flaws and return actionable remediation details.",
       input_fields: {
@@ -44,6 +45,8 @@ export const TEMPLATE_REGISTRY: Record<TemplateId, SpecTemplate> = {
         severity: field("string", "Overall severity classification"),
         remediation: field("array", "Concrete remediation steps", { items: { type: "string" } }),
         risk_summary: field("object", "Risk summary and affected areas"),
+        auth_requirements: field("object", "Authentication and authorization requirements"),
+        observability: field("object", "Security monitoring and observability requirements"),
       },
     },
   },
@@ -124,6 +127,38 @@ export const TEMPLATE_REGISTRY: Record<TemplateId, SpecTemplate> = {
         module_boundaries: field("object", "Proposed module ownership"),
         compatibility_notes: field("array", "Behavior compatibility notes", { items: { type: "string" } }),
         tests: field("array", "Required tests", { items: { type: "string" } }),
+      },
+    },
+  },
+  code_analysis: {
+    id: "code_analysis",
+    version: "1.0.0",
+    intents: ["code_analysis"],
+    inputs: ["code", "language", "analysis_scope"],
+    outputs: ["strengths", "good_practices", "weaknesses", "improvement_opportunities", "maintainability_score", "summary"],
+    contract: {
+      task_instruction: "Analyze code quality, strengths, weaknesses, maintainability, readability, and engineering best practices.",
+      input_fields: {
+        code: field("string", "Code snippet, file content, or project source to analyze"),
+        language: field("string", "Programming language or framework used by the code"),
+        analysis_scope: field("string", "Focus of the analysis, such as strengths, weaknesses, maintainability, readability, or best practices"),
+      },
+      output_fields: {
+        strengths: field("array", "Strong points found in the code", {
+          items: {
+            type: "object",
+            properties: {
+              title: { type: "string" },
+              description: { type: "string" },
+              evidence: { type: "string" },
+            },
+          },
+        }),
+        good_practices: field("array", "Good engineering practices identified in the code", { items: { type: "string" } }),
+        weaknesses: field("array", "Weak points or risks found in the code", { items: { type: "object" } }),
+        improvement_opportunities: field("array", "Actionable suggestions to improve the code", { items: { type: "string" } }),
+        maintainability_score: field("number", "Maintainability score from 0 to 10"),
+        summary: field("string", "Concise summary of the code analysis"),
       },
     },
   },

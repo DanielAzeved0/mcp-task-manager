@@ -1,1 +1,128 @@
-[] 
+[
+  {
+    "prompt": "Backend health check",
+    "generated_spec": {
+      "task_instruction": "Design API endpoints with deterministic request and response contracts. Source request: Backend health check",
+      "input_fields": {
+        "resource": {
+          "type": "string",
+          "description": "Resource or domain object"
+        },
+        "operations": {
+          "type": "array",
+          "description": "Operations to support"
+        }
+      },
+      "output_fields": {
+        "endpoints": {
+          "type": "array",
+          "description": "Endpoint definitions",
+          "items": {
+            "type": "object"
+          }
+        },
+        "request_schema": {
+          "type": "object",
+          "description": "Canonical request schema"
+        },
+        "response_schema": {
+          "type": "object",
+          "description": "Canonical response schema"
+        },
+        "status_codes": {
+          "type": "array",
+          "description": "Supported status codes",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "quality_score": 10,
+    "feedback_score": 0,
+    "iterations": 1,
+    "backend_used": "fallback",
+    "id": "1778124835169",
+    "timestamp": "2026-05-07T03:33:55.169Z"
+  },
+  {
+    "prompt": "quero uma spec que corrija a cor de um botão para azul",
+    "generated_spec": {
+      "task_instruction": "Define a frontend component with structure, styling, behavior, and accessibility details. Source request: quero uma spec que corrija a cor de um botão para azul",
+      "input_fields": {
+        "component_name": {
+          "type": "string",
+          "description": "Name or role of the component"
+        },
+        "requirements": {
+          "type": "string",
+          "description": "Functional and visual requirements"
+        }
+      },
+      "output_fields": {
+        "ui_structure": {
+          "type": "object",
+          "description": "Component layout and child structure"
+        },
+        "styles": {
+          "type": "object",
+          "description": "Visual design tokens and style rules"
+        },
+        "behavior": {
+          "type": "object",
+          "description": "Interaction and state behavior"
+        },
+        "accessibility": {
+          "type": "object",
+          "description": "Accessibility requirements and checks"
+        }
+      }
+    },
+    "quality_score": 10,
+    "feedback_score": 0,
+    "iterations": 1,
+    "backend_used": "fallback",
+    "id": "1778124847666",
+    "timestamp": "2026-05-07T03:34:07.666Z"
+  },
+  {
+    "prompt": "quero uma spec que corrija a cor de um botão para azul",
+    "generated_spec": {
+      "task_instruction": "Define a frontend component with structure, styling, behavior, and accessibility details. Source request: quero uma spec que corrija a cor de um botão para azul",
+      "input_fields": {
+        "component_name": {
+          "type": "string",
+          "description": "Name or role of the component"
+        },
+        "requirements": {
+          "type": "string",
+          "description": "Functional and visual requirements"
+        }
+      },
+      "output_fields": {
+        "ui_structure": {
+          "type": "object",
+          "description": "Component layout and child structure"
+        },
+        "styles": {
+          "type": "object",
+          "description": "Visual design tokens and style rules"
+        },
+        "behavior": {
+          "type": "object",
+          "description": "Interaction and state behavior"
+        },
+        "accessibility": {
+          "type": "object",
+          "description": "Accessibility requirements and checks"
+        }
+      }
+    },
+    "quality_score": 10,
+    "feedback_score": 0,
+    "iterations": 1,
+    "backend_used": "fallback",
+    "id": "1778124852927",
+    "timestamp": "2026-05-07T03:34:12.927Z"
+  }
+]

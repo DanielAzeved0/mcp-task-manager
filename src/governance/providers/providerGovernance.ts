@@ -35,3 +35,15 @@ export function recordProviderResult(provider: ProviderHealth["provider"], succe
   providerHealth.set(provider, next);
   return next;
 }
+
+export function recordProviderFailure(
+  provider: ProviderHealth["provider"],
+  latencyMs: number,
+  options: { affectsReliability?: boolean } = {},
+): ProviderHealth {
+  if (options.affectsReliability === false) {
+    return getProviderHealth(provider);
+  }
+
+  return recordProviderResult(provider, false, latencyMs);
+}

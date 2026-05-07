@@ -22,14 +22,31 @@ function tokenize(text: string): string[] {
     update: "change",
     background: "color",
     bg: "color",
+    alterar: "change",
+    modificar: "change",
+    cor: "color",
+    botao: "button",
+    botão: "button",
     secure: "security",
     flaws: "vulnerabilities",
     flaw: "vulnerability",
+    codigo: "code",
+    analisar: "analyze",
+    analise: "analysis",
+    qualidade: "quality",
+    legibilidade: "readability",
+    manutenibilidade: "maintainability",
+    praticas: "practices",
+    pratica: "practice",
+    fortes: "strengths",
+    fracos: "weaknesses",
     gateway: "api",
     telemetry: "observability",
   };
 
   const normalized = text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9_\s-]/g, " ")
     .replace(/-/g, " ");

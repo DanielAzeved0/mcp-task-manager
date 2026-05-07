@@ -10,9 +10,9 @@ export interface ExecutionPolicy {
 
 const POLICY_BY_PROMPT_TYPE: Record<ClassificationResult["prompt_type"], ExecutionPolicy> = {
   simple: { provider: "llama", retries: 1, minConfidence: 7, validationPasses: 1, disableLlama: false },
-  medium: { provider: "llama", retries: 2, minConfidence: 8, validationPasses: 1, disableLlama: false },
-  complex: { provider: "gemini", retries: 2, minConfidence: 8.3, validationPasses: 2, disableLlama: true },
-  critical: { provider: "gemini", retries: 3, minConfidence: 8.8, validationPasses: 2, disableLlama: true },
+  medium: { provider: "llama", retries: 1, minConfidence: 8, validationPasses: 1, disableLlama: false },
+  complex: { provider: "gemini", retries: 1, minConfidence: 8.3, validationPasses: 1, disableLlama: true },
+  critical: { provider: "gemini", retries: 1, minConfidence: 8.8, validationPasses: 1, disableLlama: true },
 };
 
 export function resolveExecutionPolicy(classification: ClassificationResult): ExecutionPolicy {

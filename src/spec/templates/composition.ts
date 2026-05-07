@@ -1,12 +1,23 @@
 import type { PromptSpec } from "../../schemas/promptSpec.js";
 import type { ClassificationResult } from "../../ai/router/semanticClassifier.js";
 import { rankSemanticIntents } from "../../ai/classifier/intentSimilarityEngine.js";
-import { selectTemplate, type SpecTemplate } from "./registry.js";
+import { selectTemplate, type SpecTemplate, type TemplateId } from "./registry.js";
+import { validateIntentCompatibility } from "./intentCompatibilityMatrix.js";
+import { SEMANTIC_THRESHOLDS, validateSemanticThresholds } from "./semanticThresholdEngine.js";
+
+const TEMPLATE_PRIORITIES: Record<string, number> = {
+  security_analysis: 10,
+  architecture_design: 8,
+  api_design: 7,
+  code_analysis: 6,
+  frontend_component: 4,
+};
 
 export interface TemplateComposition {
   templates: SpecTemplate[];
   composed: SpecTemplate;
   conflicts: string[];
+  rejections: string[];
 }
 
 function mergeContracts(templates: SpecTemplate[]): { contract: PromptSpec; conflicts: string[] } {
@@ -40,18 +51,26 @@ function mergeContracts(templates: SpecTemplate[]): { contract: PromptSpec; conf
 
 export function resolveTemplateComposition(prompt: string, classification: ClassificationResult): TemplateComposition {
   const ranked = rankSemanticIntents(prompt);
-  const selectedIds = new Set([
-    classification.semantic_intent,
-    ...ranked.filter((match) => match.similarity >= Math.max(0.3, ranked[0]?.similarity * 0.5)).slice(0, 4).map((match) => match.intent),
-  ]);
+  const semanticValidation = validateSemanticThresholds(classification, ranked);
+  const compatibility = validateIntentCompatibility(classification, ranked.slice(0, 4), SEMANTIC_THRESHOLDS);
+  const selectedIds = new Set<TemplateId>(compatibility.accepted.map((match) => match.intent));
+  selectedIds.add(classification.semantic_intent as TemplateId);
 
   const templates = [...selectedIds].map((intent) => selectTemplate(intent));
-  const uniqueTemplates = templates.filter((template, index, list) => list.findIndex((candidate) => candidate.id === template.id) === index);
+  const uniqueTemplates = templates
+    .filter((template, index, list) => list.findIndex((candidate) => candidate.id === template.id) === index)
+    .sort((a, b) => {
+      if (a.intents.includes(classification.semantic_intent)) return -1;
+      if (b.intents.includes(classification.semantic_intent)) return 1;
+      return (TEMPLATE_PRIORITIES[b.id] ?? 0) - (TEMPLATE_PRIORITIES[a.id] ?? 0);
+    });
   const { contract, conflicts } = mergeContracts(uniqueTemplates);
+  const rejections = [...compatibility.rejected, ...semanticValidation.issues.map((issue) => `semantic_threshold:${issue}`)];
 
   return {
     templates: uniqueTemplates,
     conflicts,
+    rejections,
     composed: {
       id: uniqueTemplates[0]?.id ?? "general_spec",
       version: uniqueTemplates.map((template) => `${template.id}@${template.version}`).join("+"),

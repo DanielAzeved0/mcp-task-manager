@@ -6,10 +6,13 @@ import net from "net";
 import path from "path";
 import fs from "fs/promises";
 import { promptRequestSchema, promptResponseSchema } from "./schemas/promptSpec.js";
-import { promptToSpec, validateSpec, improveSpec, calculateQuality } from "./services/promptSpecService.js";
+import { ACTIVE_GEMINI_MODEL, promptToSpec, validateSpec, improveSpec, calculateQuality } from "./services/promptSpecService.js";
 import { ZodError } from "zod";
 import { logEvent } from "./observability/logger.js";
 import { getMetricsSnapshot } from "./observability/metrics.js";
+import { getProviderHealth } from "./governance/providers/providerGovernance.js";
+import { GEMINI_DEFAULT_MODEL, validateProviderModel } from "./governance/providers/providerRegistry.js";
+import { getAllProviderStates } from "./governance/providers/providerState.js";
 
 logEvent("info", "server_starting", { service: "MCP Prompt Spec API" });
 
@@ -265,6 +268,13 @@ app.post("/prompt-to-spec", async (req: Request, res: Response, next: NextFuncti
     let currentAiBackend = initialResult.ai_backend;
     let currentJsonValidation = initialResult.json_validation;
     let currentConfidence = initialResult.confidence;
+    let currentClassificationTrace = initialResult.classification_trace;
+    let currentQualityBreakdown = initialResult.quality_breakdown;
+    let currentFallbackInfo = initialResult.fallback_info;
+    let currentProviderState = initialResult.provider_state;
+    let currentModelFailoverTrace = initialResult.model_failover_trace;
+    let currentCandidateBackends = initialResult.candidate_backends;
+    let currentClassificationDecision = initialResult.classification_decision;
 
     let validationResult = validateSpec(currentSpec);
     let iterations = 1;
@@ -286,11 +296,21 @@ app.post("/prompt-to-spec", async (req: Request, res: Response, next: NextFuncti
       currentAiBackend = improved.ai_backend;
       currentJsonValidation = improved.json_validation;
       currentConfidence = initialResult.confidence;
+      currentClassificationTrace = initialResult.classification_trace;
+      currentQualityBreakdown = initialResult.quality_breakdown;
+      currentFallbackInfo = initialResult.fallback_info;
+      currentProviderState = initialResult.provider_state;
+      currentModelFailoverTrace = initialResult.model_failover_trace;
+      currentCandidateBackends = initialResult.candidate_backends;
+      currentClassificationDecision = initialResult.classification_decision;
       iterations += 1;
       qualityScore = calculateQuality(validationResult.valid, iterations);
     }
 
     const executionTimeMs = Date.now() - startTime;
+    if (currentAiBackend.fallback_used && currentQualityBreakdown?.provider_execution_quality === 0) {
+      qualityScore = Math.min(qualityScore, currentFallbackInfo?.fallback_type === "generic" ? 6 : 8);
+    }
     const meetsThreshold = qualityScore >= min_quality_score;
     const status = validationResult.valid && meetsThreshold
       ? iterations === 1
@@ -331,10 +351,21 @@ app.post("/prompt-to-spec", async (req: Request, res: Response, next: NextFuncti
       },
       ai_backend: currentAiBackend,
       confidence: currentConfidence,
+      quality_breakdown: currentQualityBreakdown,
+      classification_trace: currentClassificationTrace,
+      classification_decision: currentClassificationDecision,
+      provider_state: currentProviderState,
+      model_failover_trace: currentModelFailoverTrace,
+      candidate_backends: currentCandidateBackends,
       fallback: {
         used_fallback: currentAiBackend.fallback_used,
-        fallback_type: currentAiBackend.fallback_used ? "mock" : "none",
-        fallback_quality: currentAiBackend.fallback_used ? "context-aware" : "none",
+        fallback_type: currentFallbackInfo?.fallback_type ?? (currentAiBackend.fallback_used ? "generic" : "none"),
+        fallback_quality: currentAiBackend.fallback_used
+          ? currentFallbackInfo?.fallback_type === "intent_specific" ? "intent-aware" : "degraded"
+          : "none",
+        fallback_reason: currentFallbackInfo?.fallback_reason,
+        original_intent: currentFallbackInfo?.original_intent,
+        selected_fallback_template: currentFallbackInfo?.selected_fallback_template,
       },
       json_validation: currentJsonValidation,
       cache: {
@@ -375,9 +406,29 @@ app.get("/", (req: Request, res: Response) => {
 });
 
 app.get("/health", (req: Request, res: Response) => {
+  const geminiModel = process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL;
+  const geminiModelValidation = validateProviderModel("gemini", geminiModel, ["json_generation", "spec_generation"]);
   res.json({
     status: "ok",
     uptime: process.uptime(),
+    provider_state: getAllProviderStates(),
+    active_models: {
+      gemini: ACTIVE_GEMINI_MODEL,
+    },
+    providers: {
+      gemini: {
+        configured: Boolean(process.env.GEMINI_API_KEY),
+        model: ACTIVE_GEMINI_MODEL || geminiModelValidation.resolvedModel || geminiModel,
+        model_valid: geminiModelValidation.valid,
+        issues: geminiModelValidation.issues,
+        health: getProviderHealth("gemini"),
+      },
+      llama: {
+        configured: process.env.USE_OLLAMA !== "false",
+        model: process.env.OLLAMA_MODEL || "llama3.2",
+        health: getProviderHealth("llama"),
+      },
+    },
   });
 });
 

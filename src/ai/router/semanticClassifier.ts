@@ -1,4 +1,5 @@
 import { analyzeSemanticIntent } from "../classifier/semanticIntentEngine.js";
+import type { ClassificationTrace } from "../classifier/classificationScoring.js";
 
 export type PromptComplexity = "simple" | "medium" | "complex" | "critical";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
@@ -12,6 +13,14 @@ export interface ClassificationResult {
   routing_recommendation: RoutingRecommendation;
   confidence: number;
   signals: string[];
+  classification_trace: ClassificationTrace;
+  classification_decision?: {
+    domain?: string;
+    task?: string;
+    ambiguity_detected?: boolean;
+    confidence_gap?: number;
+    decision_reason?: string;
+  };
 }
 
 function clampScore(score: number): number {
@@ -64,6 +73,14 @@ export function classifyPromptDetailed(prompt: string): ClassificationResult {
       `route:${routing_recommendation}`,
       ...semantic.secondary.map((match) => `secondary:${match.intent}:${match.similarity}`),
     ],
+    classification_trace: semantic.classificationTrace,
+    classification_decision: {
+      domain: semantic.classificationTrace.domain,
+      task: semantic.classificationTrace.task,
+      ambiguity_detected: semantic.classificationTrace.ambiguity_detected,
+      confidence_gap: semantic.classificationTrace.confidence_gap,
+      decision_reason: semantic.classificationTrace.decision_reason,
+    },
   };
 }
 

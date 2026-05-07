@@ -96,7 +96,7 @@ A API agora retorna informações detalhadas sobre qual backend de IA foi usado:
 {
   "ai_backend": {
     "provider": "gemini",
-    "model": "gemini-1.5-flash",
+    "model": "gemini-2.5-flash",
     "fallback_used": false
   },
   "fallback": {

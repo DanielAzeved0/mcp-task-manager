@@ -104,10 +104,59 @@ export const promptConfidenceSchema = z.object({
   validation_confidence: z.number().min(0).max(10),
 });
 
+export const promptQualityBreakdownSchema = z.object({
+  structural_quality: z.number().min(0).max(10),
+  semantic_precision: z.number().min(0).max(10),
+  intent_match: z.number().min(0).max(10),
+  template_fit: z.number().min(0).max(10),
+  provider_execution_quality: z.number().min(0).max(10),
+});
+
+export const promptClassificationTraceSchema = z.object({
+  intent_scores: z.record(z.string(), z.number()),
+  negative_penalties: z.record(z.string(), z.number()),
+  boosts: z.record(z.string(), z.number()),
+  final_scores: z.record(z.string(), z.number()),
+  ambiguity_detected: z.boolean().optional(),
+  confidence_gap: z.number().optional(),
+  action_intent: z.string().optional(),
+  domain: z.string().optional(),
+  task: z.string().optional(),
+  decision_reason: z.string().optional(),
+});
+
+export const promptProviderStateSchema = z.record(z.string(), z.object({
+  provider: z.string(),
+  auth: z.string(),
+  quota: z.string(),
+  model: z.string(),
+  network: z.string(),
+  reliability: z.number(),
+  last_error_type: z.string(),
+})).optional();
+
+export const promptModelFailoverTraceSchema = z.array(z.object({
+  provider: z.string(),
+  model: z.string(),
+  error_type: z.string().optional(),
+  action: z.string(),
+})).optional();
+
+export const promptClassificationDecisionSchema = z.object({
+  domain: z.string().optional(),
+  task: z.string().optional(),
+  ambiguity_detected: z.boolean().optional(),
+  confidence_gap: z.number().optional(),
+  decision_reason: z.string().optional(),
+}).optional();
+
 export const promptFallbackSchema = z.object({
   used_fallback: z.boolean(),
   fallback_type: z.string(),
   fallback_quality: z.string(),
+  fallback_reason: z.string().optional(),
+  original_intent: z.string().optional(),
+  selected_fallback_template: z.string().optional(),
 });
 
 export const promptJsonValidationSchema = z.object({
@@ -125,6 +174,12 @@ export const promptResponseSchema = z.object({
   json_validation: promptJsonValidationSchema,
   ai_backend: promptAiBackendSchema,
   confidence: promptConfidenceSchema.optional(),
+  quality_breakdown: promptQualityBreakdownSchema.optional(),
+  classification_trace: promptClassificationTraceSchema.optional(),
+  classification_decision: promptClassificationDecisionSchema,
+  provider_state: promptProviderStateSchema,
+  model_failover_trace: promptModelFailoverTraceSchema,
+  candidate_backends: z.array(z.string()).optional(),
   fallback: promptFallbackSchema,
   cache: promptCacheSchema,
   versioning: promptVersioningSchema,

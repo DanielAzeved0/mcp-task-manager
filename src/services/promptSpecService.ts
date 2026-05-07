@@ -5,24 +5,48 @@ import { promptSpecSchema, PromptSpec } from "../schemas/promptSpec.js";
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { buildSpecFromTemplate } from "../spec/builder/specBuilder.js";
-import { calculateConfidence, type ConfidenceReport } from "../spec/confidence/confidenceEngine.js";
+import { calculateConfidence, calculateQualityBreakdown, type ConfidenceReport, type QualityBreakdown } from "../spec/confidence/confidenceEngine.js";
 import { isCanonicalField, validateSchemaCompatibility } from "../spec/contracts/canonicalFields.js";
 import { createDeterministicPlan, parsePlanDocument } from "../spec/planner/planDocument.js";
 import { selectTemplate } from "../spec/templates/registry.js";
 import { resolveTemplateComposition } from "../spec/templates/composition.js";
+import { resolveSafeFallbackTemplate, type SafeFallbackResolution, type FallbackReason } from "../spec/templates/safeFallbackResolver.js";
 import { SemanticCache } from "../cache/semantic/semanticCache.js";
 import { createTraceContext, logEvent } from "../observability/logger.js";
 import { incrementMetric, observeMetric } from "../observability/metrics.js";
 import { resolveExecutionPolicy, riskAllowsProvider, type ExecutionPolicy } from "../governance/policies/policyEngine.js";
-import { getProviderHealth, recordProviderResult } from "../governance/providers/providerGovernance.js";
+import { getProviderHealth, recordProviderFailure, recordProviderResult } from "../governance/providers/providerGovernance.js";
+import { GEMINI_DEFAULT_MODEL, validateProviderHealth, validateProviderModel } from "../governance/providers/providerRegistry.js";
+import { classifyProviderError, type ProviderErrorClassification } from "../governance/providers/providerErrorTaxonomy.js";
+import { getAllProviderStates, getProviderState, markProviderModelAvailable, updateProviderStateFromError, type ProviderCapabilityState } from "../governance/providers/providerState.js";
+import { buildGeminiModelFailoverChain, shouldTryNextGeminiModel, type ModelFailoverEvent } from "../ai/providers/modelFailover.js";
+import { probeGeminiModelAvailability } from "../ai/providers/startupProbe.js";
+import { resolveUserOverride } from "../governance/providers/userOverrideResolver.js";
 import { validateSpecSafety } from "../governance/safety/safetyEngine.js";
+import { enforceLearningBoundaries } from "../spec/learning/learningBoundaryEngine.js";
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL;
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
 const MAX_GENERATION_ATTEMPTS = 2;
-const AI_COMPLETION_TIMEOUT_MS = Number(process.env.AI_COMPLETION_TIMEOUT_MS) || 30000;
+const PROVIDER_EXECUTION_POLICIES = {
+  llama: {
+    timeoutMs: Number(process.env.LLAMA_TIMEOUT_MS) || 12000,
+    maxRetries: 1,
+  },
+  gemini: {
+    timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS) || 25000,
+    maxRetries: 2,
+  },
+};
 const HISTORY_FILE = join(process.cwd(), 'promptSpecHistory.json');
 const semanticSpecCache = new SemanticCache<NormalizedSpec>();
+const startupGeminiValidation = probeGeminiModelAvailability(GEMINI_MODEL);
+export const ACTIVE_GEMINI_MODEL = startupGeminiValidation.selected_model;
+if (!startupGeminiValidation.valid) {
+  logEvent("error", "provider_model_invalid", { provider: "gemini", model: GEMINI_MODEL, issues: startupGeminiValidation.issues, phase: "startup", model_failover_trace: startupGeminiValidation.model_failover_trace });
+} else {
+  logEvent("info", "provider_model_validated", { provider: "gemini", model: ACTIVE_GEMINI_MODEL, phase: "startup", model_failover_trace: startupGeminiValidation.model_failover_trace });
+}
 
 interface SpecHistoryEntry {
   id: string;
@@ -1332,9 +1356,25 @@ type AiBackend = {
   risk_level?: string;
 };
 
+type FallbackInfo = {
+  used_fallback: boolean;
+  fallback_type: "none" | "intent_specific" | "generic" | "semantic_cache";
+  fallback_reason?: FallbackReason;
+  original_intent?: string;
+  selected_fallback_template?: string;
+};
+
 type BackendCandidate = {
   client: any;
   backend: AiBackend;
+  deterministic?: boolean;
+};
+
+type ProviderRuntimeInfo = {
+  provider_state: Record<string, ProviderCapabilityState>;
+  model_failover_trace: ModelFailoverEvent[];
+  candidate_backends: string[];
+  classification_decision?: ClassificationResult["classification_decision"];
 };
 
 function createLlamaCandidate(classification: ClassificationResult, fallbackUsed: boolean): BackendCandidate | null {
@@ -1356,12 +1396,19 @@ function createLlamaCandidate(classification: ClassificationResult, fallbackUsed
 
 function createGeminiCandidate(classification: ClassificationResult, fallbackUsed: boolean): BackendCandidate | null {
   if (!geminiClient) return null;
+  const health = getProviderHealth("gemini");
+  const healthValidation = validateProviderHealth("gemini", health.reliability);
+  if (!healthValidation.valid) {
+    logEvent("warn", "provider_health_invalid", { provider: "gemini", issues: healthValidation.issues, health });
+    return null;
+  }
+  logEvent("info", "provider_resolution", { provider: "gemini", model: ACTIVE_GEMINI_MODEL, health });
 
   return {
     client: geminiClient,
     backend: {
       provider: "gemini",
-      model: GEMINI_MODEL,
+      model: ACTIVE_GEMINI_MODEL,
       fallback_used: fallbackUsed,
       prompt_type: classification.prompt_type,
       semantic_intent: classification.semantic_intent,
@@ -1371,9 +1418,9 @@ function createGeminiCandidate(classification: ClassificationResult, fallbackUse
 }
 
 function selectBackend(preferredBackend: string = "auto", prompt: string = ""): { candidates: BackendCandidate[]; classification: ClassificationResult; policy: ExecutionPolicy } {
-  const normalizedPreference = (preferredBackend || "auto").toLowerCase();
   const classification = classifyPromptDetailed(prompt);
   const policy = resolveExecutionPolicy(classification);
+  const override = resolveUserOverride(preferredBackend, classification, policy);
   const candidates: BackendCandidate[] = [];
 
   const addLlama = (fallbackUsed: boolean) => {
@@ -1390,28 +1437,72 @@ function selectBackend(preferredBackend: string = "auto", prompt: string = ""): 
     if (candidate) candidates.push(candidate);
   };
 
-  if (normalizedPreference === "llama" || normalizedPreference === "ollama") {
-    if (!policy.disableLlama && riskAllowsProvider(classification.risk_level, "llama")) addLlama(false);
-    addGemini(true);
+  const addDeterministic = () => {
+    candidates.push({
+      client: null,
+      deterministic: true,
+      backend: {
+        provider: "deterministic_builder",
+        model: "template-compiler",
+        fallback_used: true,
+        prompt_type: classification.prompt_type,
+        semantic_intent: classification.semantic_intent,
+        risk_level: classification.risk_level,
+      },
+    });
+    logEvent("info", "fallback_candidate_added", {
+      provider: "deterministic_builder",
+      model: "template-compiler",
+      intent: classification.semantic_intent,
+    });
+  };
+
+  if (override.manualOverride) {
+    logEvent("info", "manual_override_applied", {
+      requested_provider: override.provider,
+      policy_provider: policy.provider,
+      warnings: override.warnings,
+    });
+    if (override.provider === "llama") {
+      addLlama(false);
+      addGemini(true);
+    }
+    if (override.provider === "gemini") addGemini(false);
+    addDeterministic();
     return { candidates, classification, policy };
   }
 
-  if (normalizedPreference === "gemini") {
-    addGemini(false);
-    return { candidates, classification, policy };
-  }
-
-  if (policy.provider === "llama" && !policy.disableLlama && riskAllowsProvider(classification.risk_level, "llama")) {
+  if (override.provider === "llama" && !policy.disableLlama && riskAllowsProvider(classification.risk_level, "llama")) {
     addLlama(false);
     addGemini(true);
   } else {
     addGemini(false);
   }
 
+  addDeterministic();
   return { candidates, classification, policy };
 }
 
-async function createCompletion(messages: Array<{ role: "system" | "user"; content: string }>, client: any): Promise<CompletionResult> {
+function resolveFallbackReason(lastError: string, candidates: BackendCandidate[]): FallbackReason {
+  if (!lastError.trim()) return "no_candidate_backend";
+  if (candidates.length === 0) return "no_candidate_backend";
+  const errorClassification = classifyProviderError(lastError);
+  if (errorClassification.type === "model_deprecated") return "provider_model_deprecated";
+  if (errorClassification.type === "quota_exceeded") return "provider_quota_exceeded";
+  if (errorClassification.type === "auth_error") return "provider_api_key_invalid";
+  if (errorClassification.type === "timeout") return "provider_timeout";
+  if (errorClassification.type === "health_error") return "provider_health_invalid";
+  if (errorClassification.type === "malformed_response") return "schema_validation_failed";
+  const normalized = lastError.toLowerCase();
+  if (normalized.includes("timed out")) return "provider_timeout";
+  if (normalized.includes("health")) return "provider_health_invalid";
+  if (normalized.includes("confidence")) return "low_confidence";
+  if (normalized.includes("validation") || normalized.includes("schema") || normalized.includes("json")) return "schema_validation_failed";
+  if (normalized.includes("api key") || normalized.includes("unauthorized") || normalized.includes("permission")) return "provider_api_key_invalid";
+  return "schema_validation_failed";
+}
+
+async function createCompletion(messages: Array<{ role: "system" | "user"; content: string }>, client: any, modelOverride?: string): Promise<CompletionResult> {
   if (!client) {
     throw new Error("No AI client available for completion.");
   }
@@ -1462,8 +1553,9 @@ async function createCompletion(messages: Array<{ role: "system" | "user"; conte
       throw new Error("Gemini client not available.");
     }
 
+    const selectedModel = modelOverride || ACTIVE_GEMINI_MODEL;
     const model = geminiClient.getGenerativeModel({
-      model: GEMINI_MODEL,
+      model: selectedModel,
       generationConfig: {
         temperature: 0.2,
         maxOutputTokens: 900,
@@ -1484,17 +1576,21 @@ async function createCompletion(messages: Array<{ role: "system" | "user"; conte
 
     const tokens = Math.ceil(content.length / 4);
 
-    return { content, tokens, model: GEMINI_MODEL };
+    return { content, tokens, model: selectedModel };
   }
 
   throw new Error("Unsupported AI client.");
 }
 
-function withCompletionTimeout<T>(promise: Promise<T>, backend: string): Promise<T> {
+function getProviderExecutionPolicy(backend: string) {
+  return backend === "gemini" ? PROVIDER_EXECUTION_POLICIES.gemini : PROVIDER_EXECUTION_POLICIES.llama;
+}
+
+function withCompletionTimeout<T>(promise: Promise<T>, backend: string, timeoutMs: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(new Error(`${backend} completion timed out after ${AI_COMPLETION_TIMEOUT_MS}ms`));
-    }, AI_COMPLETION_TIMEOUT_MS);
+      reject(new Error(`${backend} completion timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
 
     promise
       .then((value) => {
@@ -1508,7 +1604,7 @@ function withCompletionTimeout<T>(promise: Promise<T>, backend: string): Promise
   });
 }
 
-export async function promptToSpec(prompt: string, context?: string, preferredBackend: string = "auto", strictJson: boolean = false): Promise<CompletionResult & { spec: NormalizedSpec; ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean }; confidence: ConfidenceReport }> {
+export async function promptToSpec(prompt: string, context?: string, preferredBackend: string = "auto", strictJson: boolean = false): Promise<CompletionResult & { spec: NormalizedSpec; ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean }; confidence: ConfidenceReport; quality_breakdown: QualityBreakdown; classification_trace?: ClassificationResult["classification_trace"]; fallback_info: FallbackInfo } & ProviderRuntimeInfo> {
   const createUserPrompt = (attempt: number, previousErrors: string[]) => {
     const basePrompt = [`Raw prompt:\n${prompt}`];
     if (context?.trim()) {
@@ -1636,7 +1732,8 @@ No explanations, no markdown, just the JSON object.`;
   };
 
   const trace = createTraceContext();
-  const semanticHit = semanticSpecCache.get(prompt);
+  const cachePrompt = context?.trim() ? `${prompt.trim()}\n\n${context.trim()}` : prompt.trim();
+  const semanticHit = semanticSpecCache.get(cachePrompt);
   if (semanticHit) {
     logEvent("info", "semantic_cache_hit", {
       similarity: Number(semanticHit.similarity.toFixed(2)),
@@ -1657,11 +1754,28 @@ No explanations, no markdown, just the JSON object.`;
         provider_reliability: 10,
         template_alignment: 9,
         validation_confidence: 9,
-      }
+      },
+      quality_breakdown: {
+        structural_quality: 9,
+        semantic_precision: 9,
+        intent_match: 9,
+        template_fit: 9,
+        provider_execution_quality: 10,
+      },
+      fallback_info: {
+        used_fallback: true,
+        fallback_type: "semantic_cache",
+      },
+      provider_state: getAllProviderStates(),
+      model_failover_trace: [],
+      candidate_backends: ["semantic_cache"],
+      classification_decision: undefined,
     };
   }
 
   const { candidates, classification, policy } = selectBackend(preferredBackend, prompt);
+  const candidateBackends = candidates.map((candidate) => candidate.backend.provider);
+  const modelFailoverTrace: ModelFailoverEvent[] = [];
   incrementMetric("routing_requests");
   logEvent("info", "prompt_classified", {
     prompt_type: classification.prompt_type,
@@ -1672,9 +1786,47 @@ No explanations, no markdown, just the JSON object.`;
     policy_provider: policy.provider,
     min_confidence: policy.minConfidence,
   }, trace);
+  logEvent("info", "classification_trace_generated", {
+    intent_scores: classification.classification_trace.intent_scores,
+    negative_penalties: classification.classification_trace.negative_penalties,
+    boosts: classification.classification_trace.boosts,
+    final_scores: classification.classification_trace.final_scores,
+    ambiguity_detected: classification.classification_trace.ambiguity_detected,
+    confidence_gap: classification.classification_trace.confidence_gap,
+    action_intent: classification.classification_trace.action_intent,
+  }, trace);
+  logEvent("info", "hierarchical_classification_completed", {
+    semantic_intent: classification.semantic_intent,
+    classification_decision: classification.classification_decision,
+  }, trace);
+  if (classification.classification_trace.action_intent) {
+    logEvent("info", "verb_intent_boost_applied", {
+      action_intent: classification.classification_trace.action_intent,
+      domain: classification.classification_trace.domain,
+      task: classification.classification_trace.task,
+      reason: classification.classification_trace.decision_reason,
+    }, trace);
+  }
+  if (classification.classification_trace.ambiguity_detected) {
+    logEvent("warn", "confidence_gap_detected", {
+      semantic_intent: classification.semantic_intent,
+      confidence_gap: classification.classification_trace.confidence_gap,
+      reason: classification.classification_trace.decision_reason,
+    }, trace);
+  }
+  for (const [intent, penalty] of Object.entries(classification.classification_trace.negative_penalties)) {
+    if (penalty < 0) {
+      logEvent("debug", "negative_penalty_applied", { intent, penalty }, trace);
+    }
+  }
+  for (const [intent, boost] of Object.entries(classification.classification_trace.boosts)) {
+    if (boost > 0) {
+      logEvent("debug", "domain_boost_applied", { intent, boost }, trace);
+    }
+  }
   logEvent("info", "backend_selected", {
     selected_backend: candidates[0]?.backend.provider ?? "local_fallback",
-    candidate_backends: candidates.map((candidate) => candidate.backend.provider),
+    candidate_backends: candidateBackends,
     prompt_type: classification.prompt_type,
   }, trace);
 
@@ -1692,7 +1844,14 @@ No explanations, no markdown, just the JSON object.`;
     template_version: template.version,
     composed_templates: composition.templates.map((item) => item.id),
     conflicts: composition.conflicts,
+    rejections: composition.rejections,
   }, trace);
+  if (composition.rejections.length > 0) {
+    logEvent("warn", "composition_rejected", {
+      primary_intent: classification.semantic_intent,
+      rejections: composition.rejections,
+    }, trace);
+  }
 
   let lastError = "";
   let rawAiResponse = "";
@@ -1701,16 +1860,39 @@ No explanations, no markdown, just the JSON object.`;
 
   for (const candidate of candidates) {
     const { client, backend } = candidate;
+    if (candidate.deterministic) continue;
+    const providerPolicy = getProviderExecutionPolicy(backend.provider);
+    const maxProviderAttempts = Math.min(Math.max(MAX_GENERATION_ATTEMPTS, policy.retries), providerPolicy.maxRetries + 1);
+    const modelChain = backend.provider === "gemini" ? buildGeminiModelFailoverChain(backend.model) : [backend.model];
 
-    for (let attempt = 1; attempt <= Math.max(MAX_GENERATION_ATTEMPTS, policy.retries); attempt += 1) {
-      const attemptStartedAt = Date.now();
-      try {
-        const completion = await withCompletionTimeout(createCompletion([
+    for (const modelCandidate of modelChain) {
+      if (backend.provider === "gemini") {
+        const staticValidation = validateProviderModel("gemini", modelCandidate, ["json_generation", "spec_generation"]);
+        modelFailoverTrace.push({ provider: "gemini", model: modelCandidate, action: "attempt" });
+        if (!staticValidation.valid) {
+          updateProviderStateFromError("gemini", staticValidation.issues.join("; "));
+          modelFailoverTrace.push({ provider: "gemini", model: modelCandidate, error_type: "model_deprecated", action: "try_next_model" });
+          logEvent("warn", "model_deprecated_detected", { provider: "gemini", model: modelCandidate, issues: staticValidation.issues }, trace);
+          logEvent("info", "model_failover_attempted", { provider: "gemini", failed_model: modelCandidate, reason: "model_deprecated" }, trace);
+          lastError = staticValidation.issues.join("; ");
+          continue;
+        }
+      }
+
+      for (let attempt = 1; attempt <= maxProviderAttempts; attempt += 1) {
+        const attemptStartedAt = Date.now();
+        try {
+          const completion = await withCompletionTimeout(createCompletion([
           { role: "system", content: backend.provider === "gemini" ? GEMINI_PLANNER_INSTRUCTION : SYSTEM_INSTRUCTION },
           { role: "user", content: createUserPrompt(attempt, [lastError]).trim() },
-        ], client), backend.provider);
+        ], client, modelCandidate), backend.provider, providerPolicy.timeoutMs);
+        if (backend.provider === "gemini") {
+          markProviderModelAvailable("gemini");
+          modelFailoverTrace.push({ provider: "gemini", model: modelCandidate, action: "selected" });
+        }
         const latencyMs = Date.now() - attemptStartedAt;
         observeMetric("provider_latency", latencyMs);
+        backend.model = completion.model;
 
         rawAiResponse = completion.content;
         logEvent("debug", "ai_response_received", {
@@ -1738,7 +1920,14 @@ No explanations, no markdown, just the JSON object.`;
         const validationResult = validateSpec(baseSpec);
         if (validationResult.valid) {
           const { improvedSpec, improvements } = improveWithLearning(baseSpec, prompt);
-          const { spec: finalSpec, qualityScore, appliedFixes } = enforceQualityStandards(improvedSpec, prompt);
+          const boundary = enforceLearningBoundaries(improvedSpec, classification.semantic_intent);
+          if (boundary.violations.length > 0) {
+            logEvent("warn", "learning_boundary_enforced", {
+              intent: classification.semantic_intent,
+              blocked_outputs: boundary.violations,
+            }, trace);
+          }
+          const { spec: finalSpec, qualityScore, appliedFixes } = enforceQualityStandards(boundary.spec, prompt);
           const confidence = calculateConfidence({
             classification,
             spec: finalSpec,
@@ -1747,26 +1936,31 @@ No explanations, no markdown, just the JSON object.`;
             fallbackUsed: backend.fallback_used,
             providerReliability: getProviderHealth(backend.provider === "gemini" ? "gemini" : "llama").reliability,
           });
+          const qualityBreakdown = calculateQualityBreakdown({
+            confidence,
+            fallbackUsed: backend.fallback_used,
+            provider: backend.provider,
+          });
           const safety = validateSpecSafety(finalSpec);
 
           if (qualityScore < 8) {
             logEvent("warn", "quality_rejected", { quality_score: qualityScore, backend: backend.provider }, trace);
             lastError = `Quality score ${qualityScore} below threshold 8. Applied fixes: ${appliedFixes.join(", ")}`;
-            continue;
+            break;
           }
 
           if (confidence.validation_confidence < policy.minConfidence || confidence.schema_match < policy.minConfidence) {
             incrementMetric("low_confidence_rejections");
             lastError = `Confidence below policy threshold ${policy.minConfidence}`;
             logEvent("warn", "quality_rejected", { reason: "low_confidence", confidence, policy }, trace);
-            continue;
+            break;
           }
 
           if (!safety.allowed) {
             incrementMetric("unsafe_output_blocks");
             lastError = `Safety validation failed: ${safety.issues.join("; ")}`;
             logEvent("error", "unsafe_output_blocked", { issues: safety.issues, backend: backend.provider }, trace);
-            continue;
+            break;
           }
 
           addToHistory({
@@ -1779,7 +1973,17 @@ No explanations, no markdown, just the JSON object.`;
           });
 
           const normalizedSpec = normalizeSpec(finalSpec);
-          semanticSpecCache.set(prompt, prompt, normalizedSpec);
+          if (!backend.fallback_used && ["gemini", "llama"].includes(backend.provider) && confidence.semantic_alignment >= 8 && confidence.template_alignment >= 8) {
+            semanticSpecCache.set(cachePrompt, cachePrompt, normalizedSpec);
+          } else {
+            incrementMetric("semantic_cache_poison_prevention_count");
+            logEvent("info", "semantic_cache_write_skipped", {
+              provider: backend.provider,
+              fallback_used: backend.fallback_used,
+              semantic_alignment: confidence.semantic_alignment,
+              template_alignment: confidence.template_alignment,
+            }, trace);
+          }
           recordProviderResult(backend.provider === "gemini" ? "gemini" : "llama", true, latencyMs);
           incrementMetric("routing_success");
 
@@ -1800,58 +2004,117 @@ No explanations, no markdown, just the JSON object.`;
             spec: normalizedSpec,
             ai_backend: backend,
             json_validation: jsonValidation,
-            confidence
+            confidence,
+            quality_breakdown: qualityBreakdown,
+            fallback_info: {
+              used_fallback: backend.fallback_used,
+              fallback_type: backend.fallback_used ? "intent_specific" : "none",
+            },
+            classification_trace: classification.classification_trace,
+            provider_state: getAllProviderStates(),
+            model_failover_trace: modelFailoverTrace,
+            candidate_backends: candidateBackends,
+            classification_decision: classification.classification_decision,
           };
         }
 
-        if (!validationResult.valid && attempt < MAX_GENERATION_ATTEMPTS) {
-          logEvent("warn", "schema_validation_failed", {
-            attempt,
-            issues: validationResult.issues,
-            backend: backend.provider,
-          }, trace);
-          continue;
-        }
-
         lastError = `Validation failed: ${validationResult.issues.join("; ")}`;
-        logEvent("warn", "retry_attempt", { attempt, reason: lastError, backend: backend.provider }, trace);
-      } catch (error) {
+        logEvent("warn", "schema_validation_failed", { attempt, issues: validationResult.issues, backend: backend.provider }, trace);
+        break;
+        } catch (error) {
         lastError = error instanceof Error ? error.message : String(error);
-        recordProviderResult(backend.provider === "gemini" ? "gemini" : "llama", false, Date.now() - attemptStartedAt);
+        const providerError = classifyProviderError(error);
+        updateProviderStateFromError(backend.provider === "gemini" ? "gemini" : "llama", error);
+        logEvent("warn", "provider_error_classified", { provider: backend.provider, model: modelCandidate, error_type: providerError.type, action: providerError.action }, trace);
+        logEvent("info", "provider_state_updated", { provider: backend.provider, provider_state: getProviderState(backend.provider === "gemini" ? "gemini" : "llama") }, trace);
+        if (providerError.type === "model_deprecated") {
+          modelFailoverTrace.push({ provider: "gemini", model: modelCandidate, error_type: providerError.type, action: "try_next_model" });
+          logEvent("warn", "model_deprecated_detected", { provider: backend.provider, model: modelCandidate, error: lastError }, trace);
+          logEvent("info", "model_failover_attempted", { provider: backend.provider, failed_model: modelCandidate, reason: providerError.type }, trace);
+        }
+        if (providerError.type === "timeout") {
+          incrementMetric("provider_timeout_rate");
+          logEvent("warn", "provider_timeout", { attempt, backend: backend.provider, timeout_ms: providerPolicy.timeoutMs }, trace);
+        }
+        recordProviderFailure(backend.provider === "gemini" ? "gemini" : "llama", Date.now() - attemptStartedAt, { affectsReliability: providerError.affectsReliability });
         logEvent("warn", "retry_attempt", { attempt, reason: lastError, backend: backend.provider }, trace);
+        if (backend.provider === "gemini" && shouldTryNextGeminiModel(providerError)) break;
+        if (backend.provider === "gemini" && providerError.type === "quota_exceeded") break;
+        const jsonInvalid = /parse JSON|extract JSON|JSON/.test(lastError);
+        if (!jsonInvalid || attempt >= maxProviderAttempts) break;
+        }
       }
+      const lastProviderError = classifyProviderError(lastError);
+      if (backend.provider !== "gemini" || !shouldTryNextGeminiModel(lastProviderError)) break;
     }
   }
+  if (modelFailoverTrace.length > 0 && !modelFailoverTrace.some((event) => event.action === "selected")) {
+    modelFailoverTrace.push({ provider: "gemini", model: ACTIVE_GEMINI_MODEL, action: "exhausted" });
+  }
 
-  // Fast deterministic fallback - no AI calls, no complex processing
-  const fallbackSpec: PromptSpec = buildSpecFromTemplate(template, prompt, fallbackPlan.required_inputs, fallbackPlan.required_outputs);
+  // Fast deterministic fallback - no AI calls, no learning enrichment.
+  const fallbackReason = resolveFallbackReason(lastError, candidates);
+  const fallbackResolution: SafeFallbackResolution = resolveSafeFallbackTemplate(classification, fallbackReason);
+  const safeFallbackTemplate = fallbackResolution.template;
+  logEvent("warn", "fallback_template_selected", {
+    template_id: fallbackResolution.selectedFallbackTemplate,
+    fallback_type: fallbackResolution.fallbackType,
+    fallback_reason: fallbackResolution.fallbackReason,
+    original_intent: classification.semantic_intent,
+    warnings: fallbackResolution.warnings,
+  }, trace);
+  logEvent("warn", "fallback_reason_recorded", {
+    fallback_reason: fallbackResolution.fallbackReason,
+    original_intent: classification.semantic_intent,
+    selected_fallback_template: fallbackResolution.selectedFallbackTemplate,
+  }, trace);
+  if (fallbackResolution.fallbackType === "intent_specific") {
+    incrementMetric("intent_specific_fallback_rate");
+    logEvent("info", "intent_specific_fallback_selected", {
+      intent: classification.semantic_intent,
+      template_id: fallbackResolution.selectedFallbackTemplate,
+      confidence: classification.confidence,
+    }, trace);
+  } else {
+    incrementMetric("generic_fallback_rate");
+  }
 
-  // Apply learning to fallback
-  const { improvedSpec: learnedFallbackSpec, improvements: learningImprovements } = improveWithLearning(fallbackSpec, prompt);
-
-  // Enforce quality standards on fallback
-  const { spec: qualityEnforcedFallback, qualityScore, appliedFixes } = enforceQualityStandards(learnedFallbackSpec, prompt);
+  const fallbackSpec: PromptSpec = buildSpecFromTemplate(safeFallbackTemplate, prompt, safeFallbackTemplate.inputs, safeFallbackTemplate.outputs);
+  const { spec: qualityEnforcedFallback, violations: fallbackBoundaryViolations } = enforceLearningBoundaries(fallbackSpec, safeFallbackTemplate.id);
+  const qualityScore = calculateQualityScore(qualityEnforcedFallback);
 
   const fallbackConfidence = calculateConfidence({
     classification,
     spec: qualityEnforcedFallback,
     validationIssues: [],
-    templateFields: { inputs: template.inputs, outputs: template.outputs },
+    templateFields: { inputs: safeFallbackTemplate.inputs, outputs: safeFallbackTemplate.outputs },
     fallbackUsed: true,
     providerReliability: getProviderHealth("fallback").reliability,
   });
+  const fallbackQualityBreakdown = calculateQualityBreakdown({
+    confidence: fallbackConfidence,
+    fallbackUsed: true,
+    fallbackType: fallbackResolution.fallbackType,
+    provider: "fallback",
+  });
   incrementMetric("fallback_rate");
+  incrementMetric("semantic_cache_poison_prevention_count");
   recordProviderResult("fallback", true, 0);
+  logEvent("info", "quality_breakdown_generated", { ...fallbackQualityBreakdown }, trace);
+  logEvent("info", "semantic_cache_write_skipped", {
+    provider: "fallback",
+    fallback_type: fallbackResolution.fallbackType,
+    fallback_reason: fallbackResolution.fallbackReason,
+  }, trace);
 
   logEvent("warn", "fallback_triggered", {
     prompt,
     preferredBackend,
     strictJson,
-    retryCount: MAX_GENERATION_ATTEMPTS,
+    retryCount: 1,
     lastError,
     fallback_spec: qualityEnforcedFallback,
-    learning_improvements: learningImprovements,
-    quality_fixes: appliedFixes,
+    learning_boundary_violations: fallbackBoundaryViolations,
   }, trace);
 
   // Store fallback in history
@@ -1860,7 +2123,7 @@ No explanations, no markdown, just the JSON object.`;
     generated_spec: qualityEnforcedFallback,
     quality_score: qualityScore,
     feedback_score: 0,
-    iterations: MAX_GENERATION_ATTEMPTS,
+    iterations: 1,
     backend_used: 'fallback'
   });
 
@@ -1901,12 +2164,24 @@ No explanations, no markdown, just the JSON object.`;
         risk_level: classification.risk_level,
       },
       json_validation: { is_valid: true, attempts: 1, auto_fixed: false },
-      confidence: fallbackConfidence
+      confidence: fallbackConfidence,
+      quality_breakdown: fallbackQualityBreakdown,
+      fallback_info: {
+        used_fallback: true,
+        fallback_type: "generic",
+        fallback_reason: "schema_validation_failed",
+        original_intent: classification.semantic_intent,
+        selected_fallback_template: "general_spec",
+      },
+      classification_trace: classification.classification_trace,
+      provider_state: getAllProviderStates(),
+      model_failover_trace: modelFailoverTrace,
+      candidate_backends: candidateBackends,
+      classification_decision: classification.classification_decision,
     };
   }
 
   const normalizedFallbackSpec = normalizeSpec(qualityEnforcedFallback);
-  semanticSpecCache.set(prompt, prompt, normalizedFallbackSpec);
 
   return {
     content: JSON.stringify(qualityEnforcedFallback),
@@ -1922,7 +2197,20 @@ No explanations, no markdown, just the JSON object.`;
       risk_level: classification.risk_level,
     },
     json_validation: { is_valid: true, attempts: 1, auto_fixed: false },
-    confidence: fallbackConfidence
+    confidence: fallbackConfidence,
+    quality_breakdown: fallbackQualityBreakdown,
+    fallback_info: {
+      used_fallback: true,
+      fallback_type: fallbackResolution.fallbackType,
+      fallback_reason: fallbackResolution.fallbackReason,
+      original_intent: classification.semantic_intent,
+      selected_fallback_template: fallbackResolution.selectedFallbackTemplate,
+    },
+    classification_trace: classification.classification_trace,
+    provider_state: getAllProviderStates(),
+    model_failover_trace: modelFailoverTrace,
+    candidate_backends: candidateBackends,
+    classification_decision: classification.classification_decision,
   };
 }
 
@@ -1966,7 +2254,7 @@ export async function improveSpec(spec: unknown, issues: string[] = [], context?
         role: "user",
         content: `Current spec: ${JSON.stringify(safeSpec, null, 2)}\n\nValidation issues:\n${problemSummary}`,
       },
-    ], client), backend.provider);
+    ], client), backend.provider, getProviderExecutionPolicy(backend.provider).timeoutMs);
   } catch (error) {
     logEvent("warn", "fallback_triggered", { stage: "improve_spec", reason: error instanceof Error ? error.message : String(error) });
     const promptSpecValidation = promptSpecSchema.safeParse(spec);
