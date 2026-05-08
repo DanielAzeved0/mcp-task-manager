@@ -124,5 +124,155 @@
     "backend_used": "fallback",
     "id": "1778124852927",
     "timestamp": "2026-05-07T03:34:12.927Z"
+  },
+  {
+    "prompt": "quero que vc refature esse codigo",
+    "generated_spec": {
+      "task_instruction": "Analyze code quality, strengths, weaknesses, maintainability, readability, and engineering best practices. Source request: quero que vc refature esse codigo",
+      "input_fields": {
+        "code": {
+          "type": "string",
+          "description": "Code snippet, file content, or project source to analyze"
+        },
+        "language": {
+          "type": "string",
+          "description": "Programming language or framework used by the code"
+        },
+        "analysis_scope": {
+          "type": "string",
+          "description": "Focus of the analysis, such as strengths, weaknesses, maintainability, readability, or best practices"
+        }
+      },
+      "output_fields": {
+        "strengths": {
+          "type": "array",
+          "description": "Strong points found in the code",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "good_practices": {
+          "type": "array",
+          "description": "Good engineering practices identified in the code",
+          "items": {
+            "type": "string"
+          }
+        },
+        "weaknesses": {
+          "type": "array",
+          "description": "Weak points or risks found in the code",
+          "items": {
+            "type": "object"
+          }
+        },
+        "improvement_opportunities": {
+          "type": "array",
+          "description": "Actionable suggestions to improve the code",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maintainability_score": {
+          "type": "number",
+          "description": "Maintainability score from 0 to 10"
+        },
+        "summary": {
+          "type": "string",
+          "description": "Concise summary of the code analysis"
+        }
+      }
+    },
+    "quality_score": 10,
+    "feedback_score": 0,
+    "iterations": 1,
+    "backend_used": "fallback",
+    "id": "1778208751767",
+    "timestamp": "2026-05-08T02:52:31.767Z"
+  },
+  {
+    "prompt": "quero que vc refature esse codigo",
+    "generated_spec": {
+      "task_instruction": "Analyze code quality, strengths, weaknesses, maintainability, readability, and engineering best practices. Source request: quero que vc refature esse codigo",
+      "input_fields": {
+        "code": {
+          "type": "string",
+          "description": "Code snippet, file content, or project source to analyze"
+        },
+        "language": {
+          "type": "string",
+          "description": "Programming language or framework used by the code"
+        },
+        "analysis_scope": {
+          "type": "string",
+          "description": "Focus of the analysis, such as strengths, weaknesses, maintainability, readability, or best practices"
+        }
+      },
+      "output_fields": {
+        "strengths": {
+          "type": "array",
+          "description": "Strong points found in the code",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "good_practices": {
+          "type": "array",
+          "description": "Good engineering practices identified in the code",
+          "items": {
+            "type": "string"
+          }
+        },
+        "weaknesses": {
+          "type": "array",
+          "description": "Weak points or risks found in the code",
+          "items": {
+            "type": "object"
+          }
+        },
+        "improvement_opportunities": {
+          "type": "array",
+          "description": "Actionable suggestions to improve the code",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maintainability_score": {
+          "type": "number",
+          "description": "Maintainability score from 0 to 10"
+        },
+        "summary": {
+          "type": "string",
+          "description": "Concise summary of the code analysis"
+        }
+      }
+    },
+    "quality_score": 10,
+    "feedback_score": 0,
+    "iterations": 1,
+    "backend_used": "fallback",
+    "id": "1778208782697",
+    "timestamp": "2026-05-08T02:53:02.697Z"
   }
 ]

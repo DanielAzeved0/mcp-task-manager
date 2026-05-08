@@ -78,6 +78,7 @@
             const isDark = theme === "dark";
 
             const [prompt, setPrompt] = React.useState("");
+            const [codeInput, setCodeInput] = React.useState("");
             const [preferredBackend, setPreferredBackend] = React.useState("auto");
             const [strictMode, setStrictMode] = React.useState(false);
             const [isLoading, setIsLoading] = React.useState(false);
@@ -192,6 +193,11 @@
                 setResult(null);
 
                 try {
+                    const inputs = {};
+                    if (codeInput.trim()) {
+                        inputs.code = codeInput.trim();
+                    }
+
                     const response = await fetch(apiEndpoint, {
                         method: "POST",
                         headers: {
@@ -199,6 +205,7 @@
                         },
                         body: JSON.stringify({
                             prompt: prompt.trim(),
+                            inputs,
                             preferred_backend: preferredBackend,
                             strict_mode: strictMode,
                             user_id: "user_001",
@@ -207,9 +214,20 @@
                     });
 
                     if (!response.ok) {
-                        throw new Error(`Falha na requisição da API: ${response.status}`);
+                        let errorMessage = `Falha na requisicao da API: ${response.status}`;
+                        try {
+                            const errorBody = await response.json();
+                            if (errorBody && errorBody.message) {
+                                const required = Array.isArray(errorBody.required_fields) && errorBody.required_fields.length
+                                    ? ` Campos obrigatorios: ${errorBody.required_fields.join(", ")}`
+                                    : "";
+                                errorMessage = `${errorBody.message}${required}`;
+                            }
+                        } catch (_) {
+                            // Keep fallback HTTP message when response body is not JSON.
+                        }
+                        throw new Error(errorMessage);
                     }
-
                     const data = await response.json();
                     setResult(data);
 
@@ -217,6 +235,7 @@
                     addToHistory({
                         id: Date.now(),
                         prompt: prompt.trim(),
+                        codeInput: codeInput.trim(),
                         backend: preferredBackend,
                         strictMode,
                         result: data,
@@ -257,6 +276,7 @@
 
             const loadFromHistory = (item) => {
                 setPrompt(item.prompt);
+                setCodeInput(item.codeInput || "");
                 setPreferredBackend(item.backend);
                 setStrictMode(item.strictMode);
                 setResult(item.result);
@@ -451,6 +471,38 @@
                                 fontSize: 16,
                                 resize: "vertical",
                                 fontFamily: "inherit",
+                                outline: "none",
+                            }
+                        })
+                    ]),
+
+                    React.createElement("div", { key: "code-field", style: { marginBottom: 24 } }, [
+                        React.createElement("label", {
+                            key: "label",
+                            style: {
+                                display: "block",
+                                marginBottom: 12,
+                                fontWeight: 600,
+                                fontSize: 16,
+                                color: isDark ? "#ffffff" : "#374151",
+                            }
+                        }, "Codigo / contexto para analise"),
+                        React.createElement("textarea", {
+                            key: "textarea",
+                            value: codeInput,
+                            onChange: (e) => setCodeInput(e.target.value),
+                            placeholder: "Cole aqui o codigo quando o prompt pedir analise ou refatoracao...",
+                            style: {
+                                width: "100%",
+                                minHeight: 140,
+                                padding: 16,
+                                border: `2px solid ${isDark ? "#374151" : "#d1d5db"}`,
+                                borderRadius: 8,
+                                background: isDark ? "#374151" : "#ffffff",
+                                color: isDark ? "#ffffff" : "#1f2937",
+                                fontSize: 14,
+                                resize: "vertical",
+                                fontFamily: "monospace",
                                 outline: "none",
                             }
                         })

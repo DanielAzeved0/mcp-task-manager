@@ -23,6 +23,7 @@ export interface SafeFallbackResolution {
 export function resolveSafeFallbackTemplate(classification?: ClassificationResult, fallbackReason: FallbackReason = "no_candidate_backend"): SafeFallbackResolution {
   const warnings: string[] = [];
   const general = selectTemplate("general_spec");
+  const neverDefaultTo = new Set(["api_design", "database_design", "architecture_design"]);
 
   if (!classification || !classification.semantic_intent || classification.confidence < 0.72) {
     warnings.push("degraded_confidence");
@@ -30,6 +31,10 @@ export function resolveSafeFallbackTemplate(classification?: ClassificationResul
   }
 
   const candidate = selectTemplate(classification.semantic_intent);
+  if (neverDefaultTo.has(candidate.id)) {
+    warnings.push(`fallback_template_redirected:${candidate.id}->${general.id}`);
+    return { template: general, fallbackType: "generic", selectedFallbackTemplate: general.id, fallbackReason, warnings };
+  }
   if (candidate.id === "general_spec") {
     warnings.push("missing_intent_template");
     return { template: general, fallbackType: "generic", selectedFallbackTemplate: general.id, fallbackReason, warnings };

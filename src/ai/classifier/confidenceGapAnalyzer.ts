@@ -10,7 +10,7 @@ export interface ConfidenceGapDecision {
 
 const SAFER_NON_MUTATING_ORDER = ["code_analysis", "testing_strategy", "code_refactor"];
 
-export function analyzeConfidenceGap(ranked: IntentMatch[], actionDecision: ActionIntentDecision, threshold = 0.15): ConfidenceGapDecision {
+export function analyzeConfidenceGap(ranked: IntentMatch[], actionDecision: ActionIntentDecision, threshold = 0.08): ConfidenceGapDecision {
   const [first, second] = ranked;
   if (!first || !second) {
     return { ambiguityDetected: false, gap: 1, selectedIntent: first?.intent, reason: "single_intent" };
@@ -26,6 +26,9 @@ export function analyzeConfidenceGap(ranked: IntentMatch[], actionDecision: Acti
   }
 
   const saferIntent = SAFER_NON_MUTATING_ORDER.find((intent) => [first.intent, second.intent].includes(intent as any));
+  if (saferIntent) {
+    // Metric/logging happens in the orchestration layer where a trace exists.
+  }
   return {
     ambiguityDetected: true,
     gap,

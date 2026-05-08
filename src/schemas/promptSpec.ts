@@ -3,6 +3,7 @@ import { z } from "zod";
 export const promptRequestSchema = z.object({
   prompt: z.string().trim().min(1, "prompt is required"),
   context: z.string().optional(),
+  inputs: z.record(z.string(), z.unknown()).optional(),
   strict_mode: z.boolean().optional(),
   min_quality_score: z.number().min(0).max(10).optional(),
   use_cache: z.boolean().optional(),

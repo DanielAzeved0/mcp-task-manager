@@ -24,6 +24,10 @@ import { probeGeminiModelAvailability } from "../ai/providers/startupProbe.js";
 import { resolveUserOverride } from "../governance/providers/userOverrideResolver.js";
 import { validateSpecSafety } from "../governance/safety/safetyEngine.js";
 import { enforceLearningBoundaries } from "../spec/learning/learningBoundaryEngine.js";
+import { buildJsonRetryInstruction, JsonStabilityError, parseStableJson } from "../ai/json/llmRetryController.js";
+import { injectLlmContentIntoSpec } from "../spec/contracts/llmContentExtractor.js";
+import { assertSystemOwnedStructure, enforceSchemaAuthority, SchemaAuthorityError } from "../spec/contracts/schemaAuthorityGuard.js";
+import { shouldBlockHeuristicFieldInference, validateSemanticContent, validateStrictOutputTypes, SemanticGovernanceError } from "../spec/governance/semanticGovernance.js";
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL;
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
@@ -32,10 +36,12 @@ const PROVIDER_EXECUTION_POLICIES = {
   llama: {
     timeoutMs: Number(process.env.LLAMA_TIMEOUT_MS) || 12000,
     maxRetries: 1,
+    maxOutputTokens: Number(process.env.LLAMA_MAX_OUTPUT_TOKENS) || 1024,
   },
   gemini: {
     timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS) || 25000,
     maxRetries: 2,
+    maxOutputTokens: Number(process.env.GEMINI_MAX_OUTPUT_TOKENS) || 2048,
   },
 };
 const HISTORY_FILE = join(process.cwd(), 'promptSpecHistory.json');
@@ -1019,6 +1025,12 @@ const QUALITY_RULES: QualityRule[] = [
 ];
 
 function inferFieldsFromPrompt(prompt: string, fieldType: 'input' | 'output'): Record<string, any> {
+  if (shouldBlockHeuristicFieldInference(prompt)) {
+    incrementMetric("semantic_rejections_total");
+    logEvent("warn", "heuristic_block_triggered", { field_type: fieldType });
+    return {};
+  }
+
   const lowerPrompt = prompt.toLowerCase();
   const inferredFields: Record<string, any> = {};
 
@@ -1186,6 +1198,22 @@ security_analysis, frontend_component, api_design, architecture_design, code_ref
 observability_analysis, database_design, ai_orchestration, testing_strategy,
 performance_optimization, general_spec.`;
 
+const CONTENT_ONLY_INSTRUCTION = `You are a content assistant for an AI Specification Operating System.
+
+You are NOT allowed to define schema.
+You are NOT allowed to define intent.
+You are NOT allowed to define templates.
+You must return ONLY a JSON object with this exact root shape:
+{
+  "content": {}
+}
+
+The content object may only contain keys explicitly listed in the user message.
+Do not include task_instruction, input_fields, output_fields, schema, structure, intent, required_inputs, required_outputs, suggested_template, risk_level, or quality_constraints.
+Return ONLY valid JSON.
+Do not include markdown.
+Do not include explanations.`;
+
 const IMPROVEMENT_INSTRUCTION = `You are an expert prompt engineering assistant. Transform the following specification into deeply structured, production-grade output.
 
 TRANSFORMATION REQUIREMENTS:
@@ -1270,75 +1298,6 @@ function resolveOllamaModel(configuredModel: string): { resolvedModel: string; s
   const fallbackModel = availableModels[0];
   logEvent("warn", "ollama_model_fallback", { configuredModel, resolvedModel: fallbackModel, status: "fallback", availableModels });
   return { resolvedModel: fallbackModel, status: 'fallback', availableModels };
-}
-
-function extractJsonObject(rawText: string): string {
-  const start = rawText.indexOf("{");
-  const end = rawText.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error("Unable to extract JSON object from AI response.");
-  }
-  return rawText.slice(start, end + 1);
-}
-
-function fixJsonString(jsonString: string): string {
-  // Remove markdown code blocks if present
-  jsonString = jsonString.replace(/```json\s*/g, "").replace(/```\s*$/g, "");
-
-  // Fix common JSON issues
-  jsonString = jsonString
-    .replace(/,\s*}/g, "}") // Remove trailing commas
-    .replace(/,\s*]/g, "]") // Remove trailing commas in arrays
-    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":') // Quote unquoted keys
-    .replace(/:\s*'([^']*)'/g, ':"$1"') // Convert single quotes to double quotes
-    .replace(/:\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*([,}\]])/g, ':"$1"$2') // Quote unquoted string values
-    .replace(/:\s*(true|false|null)\s*([,}\]])/g, ':$1$2'); // Ensure boolean/null values are not quoted
-
-  return jsonString;
-}
-
-function parseJsonWithRetry<T>(rawText: string, strictJson: boolean = false): { parsed: T; attempts: number; autoFixed: boolean } {
-  let attempts = 1;
-  let autoFixed = false;
-
-  // First attempt: normal parsing
-  try {
-    const extracted = extractJsonObject(rawText);
-    return { parsed: JSON.parse(extracted) as T, attempts: 1, autoFixed: false };
-  } catch (error) {
-    if (!strictJson) {
-      throw error;
-    }
-
-    attempts++;
-
-    // Second attempt: try to fix common JSON issues
-    try {
-      const extracted = extractJsonObject(rawText);
-      const fixedJson = fixJsonString(extracted);
-      autoFixed = fixedJson !== extracted;
-      return { parsed: JSON.parse(fixedJson) as T, attempts: 2, autoFixed };
-    } catch (fixError) {
-      attempts++;
-
-      // Third attempt: try with the entire raw text
-      try {
-        const fixedJson = fixJsonString(rawText);
-        autoFixed = fixedJson !== rawText;
-        return { parsed: JSON.parse(fixedJson) as T, attempts: 3, autoFixed };
-      } catch (finalError) {
-        throw new Error(`Failed to parse JSON after ${attempts} attempts. Last error: ${(finalError as Error).message}`);
-      }
-    }
-  }
-}
-
-function parseJson<T>(rawText: string): T {
-  try {
-    return JSON.parse(extractJsonObject(rawText)) as T;
-  } catch (error) {
-    throw new Error(`Failed to parse JSON: ${(error as Error).message}`);
-  }
 }
 
 type CompletionResult = {
@@ -1527,7 +1486,8 @@ async function createCompletion(messages: Array<{ role: "system" | "user"; conte
         temperature: 0.2,
         top_k: 40,
         top_p: 0.9,
-      }
+        num_predict: PROVIDER_EXECUTION_POLICIES.llama.maxOutputTokens,
+      } as any
     });
 
     let content = "";
@@ -1558,7 +1518,7 @@ async function createCompletion(messages: Array<{ role: "system" | "user"; conte
       model: selectedModel,
       generationConfig: {
         temperature: 0.2,
-        maxOutputTokens: 900,
+        maxOutputTokens: PROVIDER_EXECUTION_POLICIES.gemini.maxOutputTokens,
       },
     });
 
@@ -1605,35 +1565,26 @@ function withCompletionTimeout<T>(promise: Promise<T>, backend: string, timeoutM
 }
 
 export async function promptToSpec(prompt: string, context?: string, preferredBackend: string = "auto", strictJson: boolean = false): Promise<CompletionResult & { spec: NormalizedSpec; ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean }; confidence: ConfidenceReport; quality_breakdown: QualityBreakdown; classification_trace?: ClassificationResult["classification_trace"]; fallback_info: FallbackInfo } & ProviderRuntimeInfo> {
-  const createUserPrompt = (attempt: number, previousErrors: string[]) => {
+  const createUserPrompt = (attempt: number, previousErrors: string[], contentFields: string[] = []) => {
     const basePrompt = [`Raw prompt:\n${prompt}`];
     if (context?.trim()) {
       basePrompt.push(`Context:\n${context.trim()}`);
     }
+    basePrompt.push([
+      "System-selected content fields:",
+      JSON.stringify(contentFields),
+      "Return exactly this root shape:",
+      JSON.stringify({ content: Object.fromEntries(contentFields.map((field) => [field, "content for this field"])) }, null, 2),
+      "Do not add, remove, rename, or define fields.",
+    ].join("\n"));
 
     let retryHint = "";
     if (attempt > 1) {
       const errorSummary = previousErrors.length > 0 ? ` Errors: ${previousErrors.join("; ")}` : "";
       if (attempt === 2) {
-        retryHint = `\n\nCRITICAL: Previous attempt failed validation${errorSummary}. You MUST return ONLY valid JSON with no text outside the JSON object. Ensure input_fields and output_fields are not empty. Each field must have "type" and "description". No generic "result" fields.`;
+        retryHint = `\n\nCRITICAL: Previous attempt failed validation${errorSummary}. Return ONLY the content object. Do not define schema, intent, or template. Do not use markdown fences.`;
       } else if (attempt === 3) {
-        retryHint = `\n\nFINAL ATTEMPT: Previous attempts failed${errorSummary}. Return ONLY this exact JSON structure:
-{
-  "task_instruction": "Detailed specific instruction here",
-  "input_fields": {
-    "primary_input": {
-      "type": "string",
-      "description": "Description of what this input represents"
-    }
-  },
-  "output_fields": {
-    "specific_output": {
-      "type": "string",
-      "description": "Description of the output format"
-    }
-  }
-}
-No explanations, no markdown, just the JSON object.`;
+        retryHint = `\n\nFINAL ATTEMPT: Previous attempts failed${errorSummary}. Return ONLY this exact JSON structure with the same content keys: {"content":{}}. No explanations, no markdown, no schema.`;
       }
     }
 
@@ -1808,10 +1759,16 @@ No explanations, no markdown, just the JSON object.`;
     }, trace);
   }
   if (classification.classification_trace.ambiguity_detected) {
+    incrementMetric("classification_forced_safe_total");
     logEvent("warn", "confidence_gap_detected", {
       semantic_intent: classification.semantic_intent,
       confidence_gap: classification.classification_trace.confidence_gap,
       reason: classification.classification_trace.decision_reason,
+    }, trace);
+    logEvent("warn", "confidence_gap_forced_resolution", {
+      semantic_intent: classification.semantic_intent,
+      policy: "prefer_non_mutating_intent",
+      confidence_gap: classification.classification_trace.confidence_gap,
     }, trace);
   }
   for (const [intent, penalty] of Object.entries(classification.classification_trace.negative_penalties)) {
@@ -1862,7 +1819,7 @@ No explanations, no markdown, just the JSON object.`;
     const { client, backend } = candidate;
     if (candidate.deterministic) continue;
     const providerPolicy = getProviderExecutionPolicy(backend.provider);
-    const maxProviderAttempts = Math.min(Math.max(MAX_GENERATION_ATTEMPTS, policy.retries), providerPolicy.maxRetries + 1);
+    const maxProviderAttempts = Math.max(3, Math.min(Math.max(MAX_GENERATION_ATTEMPTS, policy.retries), providerPolicy.maxRetries + 1));
     const modelChain = backend.provider === "gemini" ? buildGeminiModelFailoverChain(backend.model) : [backend.model];
 
     for (const modelCandidate of modelChain) {
@@ -1883,8 +1840,8 @@ No explanations, no markdown, just the JSON object.`;
         const attemptStartedAt = Date.now();
         try {
           const completion = await withCompletionTimeout(createCompletion([
-          { role: "system", content: backend.provider === "gemini" ? GEMINI_PLANNER_INSTRUCTION : SYSTEM_INSTRUCTION },
-          { role: "user", content: createUserPrompt(attempt, [lastError]).trim() },
+          { role: "system", content: CONTENT_ONLY_INSTRUCTION },
+          { role: "user", content: createUserPrompt(attempt, [lastError], template.outputs).trim() },
         ], client, modelCandidate), backend.provider, providerPolicy.timeoutMs);
         if (backend.provider === "gemini") {
           markProviderModelAvailable("gemini");
@@ -1903,21 +1860,22 @@ No explanations, no markdown, just the JSON object.`;
           model: completion.model,
         });
 
-        try {
-          let parseResult = parseJson<unknown>(completion.content);
-          parsedSpec = parseResult;
-          jsonValidation = { is_valid: true, attempts: 1, auto_fixed: false };
-        } catch (parseError) {
-          const fixed = parseJsonWithRetry<unknown>(completion.content, true);
-          parsedSpec = fixed.parsed;
-          jsonValidation = { is_valid: true, attempts: fixed.attempts, auto_fixed: fixed.autoFixed };
-        }
+        const stableJson = parseStableJson<unknown>(completion.content, { trace, maxAutoFixAttempts: 2 });
+        parsedSpec = stableJson.parsed;
+        jsonValidation = { is_valid: true, attempts: stableJson.attempts, auto_fixed: stableJson.autoFixed };
 
-        const plan = backend.provider === "gemini" ? parsePlanDocument(parsedSpec, fallbackPlan) : fallbackPlan;
-        const baseSpec = backend.provider === "gemini"
-          ? buildSpecFromTemplate(template, prompt, plan.required_inputs, plan.required_outputs)
-          : parsedSpec as PromptSpec;
+        const baseContract = buildSpecFromTemplate(template, prompt, fallbackPlan.required_inputs, fallbackPlan.required_outputs);
+        const content = enforceSchemaAuthority(parsedSpec, template, trace);
+        validateStrictOutputTypes(template, content, trace);
+        validateSemanticContent(classification.semantic_intent, content, trace);
+        const baseSpec = injectLlmContentIntoSpec(baseContract, template, content, trace);
+        assertSystemOwnedStructure(baseSpec, template);
         const validationResult = validateSpec(baseSpec);
+        logEvent("info", "state_machine_transition", {
+          from: "llm_invoked",
+          to: "schema_validated",
+          reason: "llm_response_received",
+        }, trace);
         if (validationResult.valid) {
           const { improvedSpec, improvements } = improveWithLearning(baseSpec, prompt);
           const boundary = enforceLearningBoundaries(improvedSpec, classification.semantic_intent);
@@ -1998,6 +1956,11 @@ No explanations, no markdown, just the JSON object.`;
             quality_score: qualityScore,
             quality_fixes: appliedFixes,
           }, trace);
+          logEvent("info", "state_machine_transition", {
+            from: "schema_validated",
+            to: "completed",
+            reason: "valid",
+          }, trace);
 
           return {
             ...completion,
@@ -2020,13 +1983,48 @@ No explanations, no markdown, just the JSON object.`;
 
         lastError = `Validation failed: ${validationResult.issues.join("; ")}`;
         logEvent("warn", "schema_validation_failed", { attempt, issues: validationResult.issues, backend: backend.provider }, trace);
+        logEvent("info", "state_machine_transition", {
+          from: "schema_validated",
+          to: "fallback_triggered",
+          reason: "schema_validation_failed",
+        }, trace);
         break;
         } catch (error) {
         lastError = error instanceof Error ? error.message : String(error);
+        const structuralViolation = error instanceof SchemaAuthorityError;
+        const governanceViolation = error instanceof SemanticGovernanceError;
+        if (error instanceof JsonStabilityError) {
+          incrementMetric("json_retry_count");
+          logEvent("warn", "json_validation_failed", { error_type: error.type, error: error.message, backend: backend.provider, model: modelCandidate }, trace);
+          logEvent("warn", "json_retry_triggered", { attempt, max_attempts: maxProviderAttempts, error_type: error.type }, trace);
+          lastError = buildJsonRetryInstruction(error.type, error.message);
+        }
+        if (error instanceof SchemaAuthorityError) {
+          incrementMetric("strict_rejection_count");
+          logEvent("warn", "json_retry_triggered", { attempt, max_attempts: maxProviderAttempts, error_type: "structural_override_attempt" }, trace);
+          lastError = `Return ONLY the content object. Do not define schema, intent, or template. Violations: ${error.violations.join(", ")}`;
+        }
+        if (error instanceof SemanticGovernanceError) {
+          incrementMetric("strict_rejection_count");
+          incrementMetric("provider_false_penalty_prevented_total");
+          incrementMetric("retry_prevented_total");
+          logEvent("warn", "retry_blocked_by_governance", { attempt, error_type: error.errorCode, reason: "deterministic_governance_error" }, trace);
+          logEvent("info", "provider_reliability_unchanged_due_to_user_error", { error_type: error.errorCode, provider: backend.provider }, trace);
+          lastError = `${error.message} Return concrete evidence in the content object only.`;
+        }
+        if (structuralViolation) {
+          incrementMetric("provider_false_penalty_prevented_total");
+          incrementMetric("retry_prevented_total");
+          logEvent("warn", "retry_blocked_by_governance", { attempt, error_type: "schema_authority_violation", reason: "deterministic_schema_authority_error" }, trace);
+          logEvent("info", "provider_reliability_unchanged_due_to_user_error", { error_type: "schema_authority_violation", provider: backend.provider }, trace);
+        }
         const providerError = classifyProviderError(error);
-        updateProviderStateFromError(backend.provider === "gemini" ? "gemini" : "llama", error);
-        logEvent("warn", "provider_error_classified", { provider: backend.provider, model: modelCandidate, error_type: providerError.type, action: providerError.action }, trace);
-        logEvent("info", "provider_state_updated", { provider: backend.provider, provider_state: getProviderState(backend.provider === "gemini" ? "gemini" : "llama") }, trace);
+        const isolatedUserError = structuralViolation || governanceViolation;
+        if (!isolatedUserError) {
+          updateProviderStateFromError(backend.provider === "gemini" ? "gemini" : "llama", error);
+          logEvent("warn", "provider_error_classified", { provider: backend.provider, model: modelCandidate, error_type: providerError.type, action: providerError.action }, trace);
+          logEvent("info", "provider_state_updated", { provider: backend.provider, provider_state: getProviderState(backend.provider === "gemini" ? "gemini" : "llama") }, trace);
+        }
         if (providerError.type === "model_deprecated") {
           modelFailoverTrace.push({ provider: "gemini", model: modelCandidate, error_type: providerError.type, action: "try_next_model" });
           logEvent("warn", "model_deprecated_detected", { provider: backend.provider, model: modelCandidate, error: lastError }, trace);
@@ -2036,8 +2034,11 @@ No explanations, no markdown, just the JSON object.`;
           incrementMetric("provider_timeout_rate");
           logEvent("warn", "provider_timeout", { attempt, backend: backend.provider, timeout_ms: providerPolicy.timeoutMs }, trace);
         }
-        recordProviderFailure(backend.provider === "gemini" ? "gemini" : "llama", Date.now() - attemptStartedAt, { affectsReliability: providerError.affectsReliability });
+        if (!isolatedUserError) {
+          recordProviderFailure(backend.provider === "gemini" ? "gemini" : "llama", Date.now() - attemptStartedAt, { affectsReliability: providerError.affectsReliability });
+        }
         logEvent("warn", "retry_attempt", { attempt, reason: lastError, backend: backend.provider }, trace);
+        if (isolatedUserError) break;
         if (backend.provider === "gemini" && shouldTryNextGeminiModel(providerError)) break;
         if (backend.provider === "gemini" && providerError.type === "quota_exceeded") break;
         const jsonInvalid = /parse JSON|extract JSON|JSON/.test(lastError);
@@ -2053,6 +2054,11 @@ No explanations, no markdown, just the JSON object.`;
   }
 
   // Fast deterministic fallback - no AI calls, no learning enrichment.
+  logEvent("info", "state_machine_transition", {
+    from: "schema_validated",
+    to: "fallback_triggered",
+    reason: "provider_or_validation_exhausted",
+  }, trace);
   const fallbackReason = resolveFallbackReason(lastError, candidates);
   const fallbackResolution: SafeFallbackResolution = resolveSafeFallbackTemplate(classification, fallbackReason);
   const safeFallbackTemplate = fallbackResolution.template;
@@ -2063,6 +2069,13 @@ No explanations, no markdown, just the JSON object.`;
     original_intent: classification.semantic_intent,
     warnings: fallbackResolution.warnings,
   }, trace);
+  if (fallbackResolution.warnings.some((warning) => warning.startsWith("fallback_template_redirected"))) {
+    logEvent("warn", "fallback_template_redirected", {
+      original_intent: classification.semantic_intent,
+      selected_fallback_template: fallbackResolution.selectedFallbackTemplate,
+      warnings: fallbackResolution.warnings,
+    }, trace);
+  }
   logEvent("warn", "fallback_reason_recorded", {
     fallback_reason: fallbackResolution.fallbackReason,
     original_intent: classification.semantic_intent,
@@ -2298,22 +2311,13 @@ export async function improveSpec(spec: unknown, issues: string[] = [], context?
     };
   }
 
-  // Parse the completion with strict JSON validation if requested
-  let parsed: AiImprovementResult;
-  let jsonValidation: { is_valid: boolean; attempts: number; auto_fixed: boolean };
-
-  if (strictJson) {
-    const jsonResult = parseJsonWithRetry<AiImprovementResult>(completion.content, true);
-    parsed = jsonResult.parsed;
-    jsonValidation = {
-      is_valid: true,
-      attempts: jsonResult.attempts,
-      auto_fixed: jsonResult.autoFixed
-    };
-  } else {
-    parsed = parseJson<AiImprovementResult>(completion.content);
-    jsonValidation = { is_valid: true, attempts: 1, auto_fixed: false };
-  }
+  const jsonResult = parseStableJson<AiImprovementResult>(completion.content, { maxAutoFixAttempts: 2 });
+  const parsed = jsonResult.parsed;
+  const jsonValidation = {
+    is_valid: true,
+    attempts: jsonResult.attempts,
+    auto_fixed: jsonResult.autoFixed
+  };
 
   const promptSpecValidation = promptSpecSchema.safeParse(parsed.prompt_spec);
   if (!promptSpecValidation.success) {
