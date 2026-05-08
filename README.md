@@ -1,299 +1,348 @@
-# MCP Task Manager 📋
+# MCP Prompt Generator
 
-Um servidor MCP totalmente funcional para gerenciamento de tarefas com widgets interativos. Desenvolvido como exemplo dos padrões do [mcp-use](https://github.com/mcp-use/mcp-use).
+Aplicacao fullstack local que converte pedidos em linguagem natural em SPECs estruturadas, usando um runtime semantico governado com Gemini, Llama/Ollama, validacao de schema, extracao de codigo inline e fallback deterministico.
 
-## 🎯 Características
+## Visao Geral
 
-- **Ferramentas Completas**
-  - ✅ Criar, atualizar e deletar tarefas
-  - 📊 Listar tarefas com filtros
-  - 📈 Estatísticas e overview
+O MCP Prompt Generator recebe um prompt do usuario, classifica a intencao, seleciona um template de SPEC, injeta contexto de codigo quando disponivel e solicita a um provider de IA apenas o conteudo permitido pelo contrato. A estrutura final da SPEC pertence ao sistema, nao ao modelo.
 
-- **Widgets Interativos**
-  - 📝 Task List Widget com tema escuro/claro
-  - 📊 Statistics Dashboard
-  - 🤖 Prompt Generator Widget (Novo!)
-  - ⚡ Atualizações em tempo real
+O projeto evoluiu de um gerador simples de prompt para um runtime de compilacao de SPECs com:
 
-- **Padrões Modernos**
-  - TypeScript com type safety
-  - Zod para validação de schema
-  - Widgets React customizados
-  - Inspector integrado para debug
+- classificacao semantica e hierarquica de intents;
+- runtime gate para entradas obrigatorias;
+- hidratacao pre-gate de codigo inline;
+- prompt compiler consciente de schema;
+- guard contra override estrutural da LLM;
+- injecao de contexto real do workspace;
+- fallback deterministico por template;
+- suite golden para regressao de comportamento.
 
-## 🚀 Quick Start
+## Principais Funcionalidades
 
-### Instalação
+- **Campo unico de entrada**: o usuario cola prompt, codigo, JSON ou contexto no mesmo textarea.
+- **Classificacao semantica**: detecta intents como `code_refactor`, `code_analysis`, `api_design`, `frontend_component`, `security_analysis` e outras.
+- **Priorizacao de refatoracao**: prompts com verbos como refatorar, reestruturar e modularizar priorizam `code_refactor`, mesmo quando citam termos de API.
+- **Runtime Input Gate**: bloqueia execucao com `422` quando uma intent exige dados obrigatorios e eles nao existem.
+- **Inline Code Pre-Gate Hydration**: extrai codigo colado no prompt e preenche `inputs.code` antes do gate.
+- **Inline Code Extraction**: detecta blocos markdown, snippets TypeScript/JavaScript e JSON colado.
+- **Code Context Injection**: seleciona arquivos relevantes do workspace e monta um `CODE_CONTEXT` compacto.
+- **Schema-Aware Prompt Compiler**: envia para a LLM um contrato tipado com exemplos validos `content-only`.
+- **Schema Authority Guard**: impede a LLM de definir schema, intent, template ou campos estruturais.
+- **Strict JSON pipeline**: sanitiza, extrai, repara quando permitido e valida JSON antes da normalizacao.
+- **Input Field Inference Guard**: impede que stopwords como `esse`, `para` e `quero` criem campos tecnicos indevidos.
+- **Provider governance**: diferencia erros de modelo, quota, auth, timeout e resposta malformada.
+- **Golden tests**: validam intents, fallback, JSON, schema, input gate, contexto inline e code pack.
+
+## Arquitetura
+
+Fluxo principal do runtime:
+
+```text
+Interface web
+  -> POST /prompt-to-spec
+  -> classificacao semantica
+  -> inline code pre-gate hydration
+  -> runtime input gate
+  -> selecao de backend
+  -> template composition
+  -> code context resolver
+  -> dependency scanner
+  -> code pack builder
+  -> schema-aware prompt compiler
+  -> Gemini ou Llama/Ollama
+  -> JSON stability engine
+  -> schema authority guard
+  -> semantic governance
+  -> quality/confidence engines
+  -> fallback deterministico, se necessario
+  -> PromptSpecResponse
+```
+
+## Fluxo de Execucao
+
+1. O usuario informa tudo no campo unico: pedido, codigo, JSON ou contexto.
+2. O frontend envia esse conteudo como `prompt`.
+3. O backend classifica a intent com o classificador semantico.
+4. Se a intent exigir `code`, o pre-gate tenta extrair codigo inline.
+5. O runtime gate bloqueia apenas quando nao ha `inputs.code` nem codigo inline.
+6. O router seleciona Gemini, Llama/Ollama ou o builder deterministico.
+7. O sistema seleciona/compoe o template da SPEC.
+8. O resolver tenta encontrar arquivos reais do workspace e dependencias relacionadas.
+9. Snippets inline viram arquivos virtuais como `inline_prompt_1.ts`.
+10. O prompt compiler injeta `structural_contract`, exemplo valido e `CODE_CONTEXT`.
+11. A LLM retorna somente `{ "content": { ... } }`.
+12. O sistema injeta esse conteudo no schema controlado pelo template.
+13. A SPEC e validada, normalizada e retornada com metadados de backend, fallback, qualidade e tracing.
+
+## Interface
+
+O frontend fica em `public/index.html` e usa React via CDN. A tela principal contem:
+
+- um textarea unico para prompt, codigo ou contexto;
+- seletor de backend (`auto`, `llama`, `gemini`);
+- checkbox de modo estrito;
+- botao `Gerar Spec`;
+- status de conexao com o backend;
+- painel de resultado JSON;
+- historico local em `localStorage`.
+
+Payload principal enviado ao backend:
+
+```json
+{
+  "prompt": "texto completo do usuario, incluindo codigo se houver",
+  "preferred_backend": "auto",
+  "strict_mode": false,
+  "user_id": "user_001",
+  "team_id": "team_001"
+}
+```
+
+## Exemplo de Uso
+
+Cole tudo no campo unico:
+
+```ts
+refatore esse codigo para melhorar a legibilidade
+
+function processarUsuarios(users: any[]) {
+  let resultado: any[] = [];
+  return resultado;
+}
+```
+
+Com esse input, o backend deve:
+
+- classificar como `code_refactor`;
+- detectar codigo inline;
+- criar `inline_prompt_1.ts`;
+- hidratar o runtime gate com `code_source: "inline_prompt"`;
+- injetar `CODE_CONTEXT` no prompt da LLM;
+- gerar uma SPEC de refatoracao seguindo o template `code_refactor`.
+
+## Resposta Esperada
+
+A resposta segue o contrato `PromptSpecResponse`. Em alto nivel:
+
+```json
+{
+  "prompt_spec": {
+    "task_instruction": "Create a refactor plan...",
+    "input_fields": {},
+    "output_fields": {}
+  },
+  "quality_score": 9,
+  "validation": {
+    "is_valid": true,
+    "issues": [],
+    "fixes_applied": []
+  },
+  "ai_backend": {
+    "provider": "gemini",
+    "model": "gemini-2.5-flash",
+    "fallback_used": false
+  },
+  "fallback": {
+    "used_fallback": false,
+    "fallback_type": "none",
+    "fallback_quality": "none"
+  }
+}
+```
+
+Para `code_refactor`, os campos de saida esperados incluem:
+
+- `refactor_plan`
+- `module_boundaries`
+- `compatibility_notes`
+- `tests`
+
+## Estrutura de Pastas
+
+```text
+public/
+  index.html                  Interface web estatica
+  backend-config.json          Arquivo gerado pelo backend com porta ativa
+
+src/
+  index.ts                     API Express, health check e runtime input gate
+  services/
+    promptSpecService.ts       Orquestracao principal da geracao de SPEC
+  ai/
+    classifier/                Catalogo, scoring, priorizacao e classificacao hierarquica
+    json/                      Sanitizacao, extracao, reparo e retry de JSON
+    prompt/                    Schema-aware prompt compiler
+    providers/                 Startup probe e failover de modelos
+    router/                    Classificador semantico e grafo de execucao
+  context/
+    inlineCodeExtractor.ts     Extrai codigo colado no prompt
+    codeContextResolver.ts     Seleciona arquivos relevantes
+    dependencyScanner.ts       Mapeia imports e relacoes por nome
+    codePackBuilder.ts         Monta CODE_CONTEXT com limite de tokens
+    codeContextMerger.ts       Mescla arquivos reais e virtuais
+  governance/
+    providers/                 Estado, taxonomia e confiabilidade de providers
+    policies/                  Politicas de execucao
+    safety/                    Validacao de seguranca
+  spec/
+    templates/                 Registry, composicao e fallback seguro
+    contracts/                 Schema authority e validadores de contrato
+    governance/                Runtime gate, semantic governance e hydration
+    confidence/                Calculo de confianca
+    learning/                  Guardrails para aprendizagem
+    builder/                   Construcao deterministica de SPEC
+    planner/                   PlanDocument deterministico
+  schemas/
+    promptSpec.ts              Schemas Zod de request/response
+  observability/
+    logger.ts                  Logs estruturados
+    metrics.ts                 Metricas em memoria
+    tracing.ts                 Contexto de tracing
+  tests/
+    golden/goldenRunner.ts     Suite golden de regressao
+```
+
+## Como Rodar
+
+Instale as dependencias:
 
 ```bash
-cd mcp-task-manager
 npm install
 ```
 
-### Configuração da IA
+Crie o arquivo `.env` a partir do exemplo:
 
-Este projeto suporta uma arquitetura hibrida com Gemini e Llama local:
-
-#### Opção 1: Gemini (Cloud)
 ```bash
 cp .env.example .env
-# Edite .env e adicione sua GEMINI_API_KEY
 ```
 
-#### Opção 2: Llama via Ollama (Local e Gratuito)
-```bash
-# 1. Instale Ollama: https://ollama.ai/download
-# 2. Baixe um modelo: ollama pull llama3.2
-# 3. Configure o .env:
-cp .env.example .env
-# Edite .env:
-USE_OLLAMA=true
-OLLAMA_MODEL=llama3.2
-```
-
-### Desenvolvimento
+Inicie backend e frontend estatico juntos:
 
 ```bash
 npm run dev
 ```
 
-O servidor iniciará em `http://localhost:3000`
+Por padrao:
 
-Acesse o Inspector em: `http://localhost:3000/inspector`
+- backend: `http://localhost:3000`
+- frontend: `http://localhost:5173`
+- health: `http://localhost:3000/health`
+- endpoint principal: `POST http://localhost:3000/prompt-to-spec`
 
-### API Endpoint
+O backend tambem escreve `public/backend-config.json` para o frontend descobrir a porta ativa.
 
-**POST /prompt-to-spec**
+## Scripts Disponiveis
 
-Parâmetros de entrada:
-- `prompt`: Texto do prompt a ser processado
-- `context`: Contexto adicional (opcional)
-- `strict_mode`: Modo rigoroso para validação (opcional)
-- `min_quality_score`: Pontuação mínima aceitável (opcional)
-- `use_cache`: Habilitar cache (opcional)
-- `preferred_backend`: Backend preferido: "auto", "llama", "ollama", ou "gemini" (opcional)
-- `user_id`: ID do usuário (obrigatório)
-- `team_id`: ID do time (opcional)
-
-#### Exemplos de Uso
+Scripts reais do `package.json`:
 
 ```bash
-# Usar Ollama (local)
-curl -X POST http://localhost:3000/prompt-to-spec \
--H "Content-Type: application/json" \
--d '{
-  "prompt": "crie uma função para somar dois números",
-  "preferred_backend": "ollama",
-  "user_id": "user123"
-}'
-
-# Usar Gemini
-curl -X POST http://localhost:3000/prompt-to-spec \
--H "Content-Type: application/json" \
--d '{
-  "prompt": "crie uma função para somar dois números",
-  "preferred_backend": "gemini",
-  "user_id": "user123"
-}'
-
-# Auto (escolhe automaticamente)
-curl -X POST http://localhost:3000/prompt-to-spec \
--H "Content-Type: application/json" \
--d '{
-  "prompt": "crie uma função para somar dois números",
-  "preferred_backend": "auto",
-  "user_id": "user123"
-}'
+npm run backend          # tsx watch src/index.ts
+npm run frontend_static  # serve public -l 5173
+npm run frontend         # alias para frontend_static
+npm run fullstack        # backend + frontend_static com concurrently
+npm run dev              # alias para fullstack
+npm run build            # compila TypeScript com tsc
+npm run test:golden      # build + suite golden
+npm start                # executa dist/index.js
 ```
 
-### Build & Deploy
+## Testes
+
+Rode a suite golden:
 
 ```bash
-npm run build
-npm start
+npm run test:golden
 ```
 
-## 🛠️ Ferramentas Disponíveis
+Ela cobre, entre outros pontos:
 
-### `create_task`
-Cria uma nova tarefa com título, descrição e prioridade.
+- classificacao de intents;
+- priorizacao de `code_refactor`;
+- fallback seguro;
+- estabilidade de JSON;
+- schema authority;
+- runtime input gate;
+- hidratacao pre-gate com codigo inline;
+- input field inference guard;
+- code context resolver;
+- inline code extraction;
+- schema-aware prompt compiler.
 
-**Parâmetros:**
-- `title` (string): Título da tarefa
-- `description` (string, opcional): Descrição detalhada
-- `priority` (enum): 'low' | 'medium' | 'high'
-- `dueDate` (ISO string, opcional): Data de vencimento
+## Variaveis de Ambiente
 
-**Exemplo:**
-```
-Criar uma tarefa "Implementar autenticação" com prioridade alta e vencimento em 2026-05-10
-```
+Exemplo em `.env.example`:
 
-### `list_tasks`
-Lista todas as tarefas com widget interativo.
-
-**Parâmetros:**
-- `filter` (enum): 'all' | 'completed' | 'pending'
-- `priority` (enum): 'all' | 'low' | 'medium' | 'high'
-
-**Retorna:** Widget interativo com lista visual de tarefas
-
-### `update_task`
-Atualiza uma tarefa existente.
-
-**Parâmetros:**
-- `taskId` (string): ID da tarefa
-- `completed` (boolean, opcional): Marcar como completa
-- `priority` (enum, opcional): Nova prioridade
-- `title` (string, opcional): Novo título
-- `description` (string, opcional): Nova descrição
-
-### `delete_task`
-Deleta uma tarefa.
-
-**Parâmetros:**
-- `taskId` (string): ID da tarefa a deletar
-
-### `get_statistics`
-Retorna estatísticas e overview das tarefas.
-
-**Retorna:** Widget com:
-- Total de tarefas
-- Tarefas completadas
-- Taxa de conclusão
-- Breakdown por prioridade
-- Tarefas atrasadas
-
-## 🎨 Estrutura do Projeto
-
-```
-mcp-task-manager/
-├── src/
-│   └── index.ts                 # Servidor principal MCP
-├── resources/
-│   ├── task-widget/
-│   │   └── widget.tsx           # Widget de lista de tarefas
-│   └── statistics-widget/
-│       └── widget.tsx           # Widget de estatísticas
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
-## 📚 Padrões do mcp-use Utilizados
-
-### 1. **Server Setup**
-```typescript
-const server = new MCPServer({
-  name: "task-manager",
-  version: "1.0.0",
-});
-```
-
-### 2. **Tool Definition**
-```typescript
-server.tool(
-  {
-    name: "create_task",
-    description: "...",
-    schema: z.object({...}),
-  },
-  async (params) => {...}
-);
-```
-
-### 3. **Text Response**
-```typescript
-return text("Task created successfully!");
-```
-
-### 4. **Widget Response**
-```typescript
-return widget({
-  props: { tasks, totalTasks, completedTasks },
-  message: "Showing tasks..."
-});
-```
-
-### 5. **Auto-discoverable Widgets**
-- Widgets em `resources/*/widget.tsx` são automaticamente descobertos
-- Cada widget exporta `widgetMetadata` com schema Zod
-- Componentes React reutilizam `useWidget()` hook
-
-## 🔧 Configuração
-
-### Mudar porta do servidor
-Em `src/index.ts`:
-```typescript
-server.listen(3000); // Alterar para porta desejada
-```
-
-### Adicionar novo widget
-1. Criar pasta em `resources/novo-widget/`
-2. Criar `widget.tsx` com export de `WidgetMetadata`
-3. Referenciar em tool com: `widget: "novo-widget"`
-
-### Persistência de dados
-Atualmente usa `Map` em memória. Para persistir:
-1. Adicionar banco de dados (SQLite, PostgreSQL, etc)
-2. Substituir `tasks` Map por queries
-
-## 🚢 Deploy
-
-### Manufact Cloud (Recomendado)
 ```bash
-npm install -g @mcp-use/cli
-mcp-use login
-mcp-use deploy
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-2.5-flash
+
+USE_OLLAMA=true
+OLLAMA_MODEL=llama3.2
+
+LLAMA_TIMEOUT_MS=12000
+GEMINI_TIMEOUT_MS=25000
+LLAMA_MAX_OUTPUT_TOKENS=1024
+GEMINI_MAX_OUTPUT_TOKENS=2048
+
+PREFERRED_BACKEND=auto
+PORT=3000
 ```
 
-### Docker
-```bash
-docker build -t mcp-task-manager .
-docker run -p 3000:3000 mcp-task-manager
-```
+Notas:
 
-### Manual
+- `GEMINI_API_KEY` e necessario para usar Gemini.
+- Ollama precisa estar instalado e com o modelo local disponivel para uso de Llama.
+- O sistema possui fallback deterministico quando providers nao estao disponiveis ou quando ha falhas controladas.
+- Nunca coloque chaves reais no README ou em commits.
+
+## Observabilidade
+
+O backend usa logs estruturados JSON. Eventos importantes:
+
+- `provider_model_validated`
+- `backend_selected`
+- `classification_trace_generated`
+- `hierarchical_classification_completed`
+- `inline_code_pre_gate_started`
+- `inline_code_pre_gate_hydrated`
+- `runtime_gate_satisfied_by_inline_code`
+- `contextual_input_missing`
+- `input_field_candidate_accepted`
+- `input_field_candidate_rejected`
+- `code_context_resolution_started`
+- `inline_code_detected`
+- `code_context_file_selected`
+- `code_pack_built`
+- `code_context_injected`
+- `schema_prompt_compiled`
+- `json_sanitization_applied`
+- `schema_authority_enforced`
+- `fallback_template_selected`
+
+O endpoint `/health` retorna status do backend, providers, estado de modelos e metricas em memoria.
+
+## Roadmap
+
+Proximos passos sugeridos, ainda nao implementados como capacidade completa:
+
+- analise AST-aware para TypeScript/JavaScript;
+- embeddings reais para ranking semantico de arquivos;
+- memoria de sessao entre requests;
+- contexto incremental por projeto;
+- medicao historica de qualidade por provider;
+- UI para visualizar trace, fallback reason e code context selecionado;
+- persistencia de metricas e eventos fora de memoria;
+- testes de contrato mais proximos de cenarios end-to-end com providers mockados.
+
+## Status Atual
+
+Status: runtime funcional em desenvolvimento local.
+
+Validacoes esperadas antes de publicar ou abrir PR:
+
 ```bash
 npm run build
-npm start
+npm run test:golden
 ```
 
-## 🧪 Testando com Inspector
-
-1. Inicie o servidor: `npm run dev`
-2. Abra `http://localhost:3000/inspector`
-3. Teste as ferramentas interativamente
-4. Veja os widgets em tempo real
-
-## 📖 Próximos Passos
-
-- [ ] Adicionar autenticação e usuários
-- [ ] Persistência com banco de dados
-- [ ] Integração com calendário
-- [ ] Notificações e lembretes
-- [ ] Colaboração em tempo real
-- [ ] Export para CSV/PDF
-
-## 🤝 Contribuindo
-
-Este é um exemplo educacional dos padrões do mcp-use. Sinta-se livre para:
-- Adicionar novas ferramentas
-- Melhorar widgets
-- Adicionar persistência
-- Criar más integrações
-
-## 📄 Licença
-
-MIT
-
-## 🔗 Recursos
-
-- [mcp-use Docs](https://mcp-use.com/docs)
-- [Model Context Protocol](https://modelcontextprotocol.io/)
-- [Zod Validation](https://zod.dev)
-- [React Documentation](https://react.dev)
-
----
-
-**Desenvolvido com ❤️ como exemplo dos padrões do mcp-use**
+Ultima revisao deste README: alinhada aos modulos atuais de classificacao semantica, runtime governance, schema enforcement, inline code extraction, code context injection e interface de campo unico.
