@@ -28,14 +28,32 @@ export function routeIntentByAction(prompt: string): ActionIntentDecision {
     hasAny(normalized, ["endpoint", "api", "rest", "graphql", "request", "response", "gateway"]) ? "api" :
     hasAny(normalized, ["botao", "button", "css", "layout", "ui", "frontend", "componente"]) ? "frontend" :
     hasAny(normalized, ["database", "banco", "tabela", "table", "index", "migration", "sql"]) ? "database" :
-    hasAny(normalized, ["codigo", "code", "classe", "funcao", "arquivo", "projeto"]) ? "code" :
+    hasAny(normalized, ["codigo", "code", "classe", "funcao", "arquivo", "projeto", "modulo", "service", "god file", "god service"]) ? "code" :
     hasAny(normalized, ["arquitetura", "architecture", "sistema", "distributed"]) ? "architecture" :
     hasAny(normalized, ["logs", "metricas", "tracing", "observability", "monitoramento"]) ? "observability" :
     "unknown";
 
   const task =
     hasAny(normalized, ["vulnerabilidade", "seguranca", "falha de seguranca", "exploit", "secure"]) ? "secure" :
-    hasAny(normalized, ["refatorar", "refatore", "reestruturar", "rewrite", "refactor", "modularizar"]) ? "refactor" :
+    hasAny(normalized, [
+      "refatorar",
+      "refatore",
+      "reestruturar",
+      "reorganizar",
+      "rewrite",
+      "reescrever",
+      "refactor",
+      "modularizar",
+      "limpar",
+      "cleanup",
+      "separar responsabilidades",
+      "dividir responsabilidades",
+      "extrair modulo",
+      "extrair funcao",
+      "remover duplicacao",
+      "desacoplar",
+      "melhorar estrutura",
+    ]) ? "refactor" :
     hasAny(normalized, ["analisar", "analise", "avaliar", "verificar", "revisar", "review", "analyze"]) ? "analyze" :
     hasAny(normalized, ["testar", "teste", "tests", "coverage"]) ? "test" :
     hasAny(normalized, ["otimizar", "optimize", "performance"]) ? "optimize" :
@@ -52,16 +70,19 @@ export function routeIntentByAction(prompt: string): ActionIntentDecision {
     boosts.security_analysis = 0.45;
     penalties.code_analysis = -0.12;
     reasons.push("secure_action_or_domain");
+  } else if (task === "refactor") {
+    resolvedIntent = "code_refactor";
+    boosts.code_refactor = 0.52;
+    penalties.code_analysis = -0.18;
+    penalties.api_design = -0.28;
+    penalties.database_design = -0.18;
+    penalties.frontend_component = -0.14;
+    reasons.push("refactor_action_priority");
   } else if (domain === "code" && task === "analyze") {
     resolvedIntent = "code_analysis";
     boosts.code_analysis = 0.35;
     penalties.code_refactor = -0.25;
     reasons.push("analyze_code_action");
-  } else if (domain === "code" && task === "refactor") {
-    resolvedIntent = "code_refactor";
-    boosts.code_refactor = 0.35;
-    penalties.code_analysis = -0.12;
-    reasons.push("refactor_code_action");
   } else if (domain === "api") {
     resolvedIntent = "api_design";
     boosts.api_design = 0.3;

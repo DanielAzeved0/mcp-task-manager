@@ -78,7 +78,6 @@
             const isDark = theme === "dark";
 
             const [prompt, setPrompt] = React.useState("");
-            const [codeInput, setCodeInput] = React.useState("");
             const [preferredBackend, setPreferredBackend] = React.useState("auto");
             const [strictMode, setStrictMode] = React.useState(false);
             const [isLoading, setIsLoading] = React.useState(false);
@@ -193,11 +192,6 @@
                 setResult(null);
 
                 try {
-                    const inputs = {};
-                    if (codeInput.trim()) {
-                        inputs.code = codeInput.trim();
-                    }
-
                     const response = await fetch(apiEndpoint, {
                         method: "POST",
                         headers: {
@@ -205,7 +199,6 @@
                         },
                         body: JSON.stringify({
                             prompt: prompt.trim(),
-                            inputs,
                             preferred_backend: preferredBackend,
                             strict_mode: strictMode,
                             user_id: "user_001",
@@ -235,7 +228,6 @@
                     addToHistory({
                         id: Date.now(),
                         prompt: prompt.trim(),
-                        codeInput: codeInput.trim(),
                         backend: preferredBackend,
                         strictMode,
                         result: data,
@@ -276,7 +268,6 @@
 
             const loadFromHistory = (item) => {
                 setPrompt(item.prompt);
-                setCodeInput(item.codeInput || "");
                 setPreferredBackend(item.backend);
                 setStrictMode(item.strictMode);
                 setResult(item.result);
@@ -451,18 +442,18 @@
                                 display: "block",
                                 marginBottom: 12,
                                 fontWeight: 600,
-                                fontSize: 16,
+                                fontSize: 15,
                                 color: isDark ? "#ffffff" : "#374151",
                             }
-                        }, "Digite seu prompt"),
+                        }, "Digite seu prompt, codigo ou contexto"),
                         React.createElement("textarea", {
                             key: "textarea",
                             value: prompt,
                             onChange: (e) => setPrompt(e.target.value),
-                            placeholder: "Descreva o que você quer que a IA faça...",
+                            placeholder: "Exemplo:\n\nrefatore esse codigo para melhorar a legibilidade\n\nfunction processarUsuarios(users: any[]) {\n  let resultado: any[] = [];\n  return resultado;\n}",
                             style: {
                                 width: "100%",
-                                minHeight: 120,
+                                minHeight: 260,
                                 padding: 16,
                                 border: `2px solid ${isDark ? "#374151" : "#d1d5db"}`,
                                 borderRadius: 8,
@@ -470,39 +461,7 @@
                                 color: isDark ? "#ffffff" : "#1f2937",
                                 fontSize: 16,
                                 resize: "vertical",
-                                fontFamily: "inherit",
-                                outline: "none",
-                            }
-                        })
-                    ]),
-
-                    React.createElement("div", { key: "code-field", style: { marginBottom: 24 } }, [
-                        React.createElement("label", {
-                            key: "label",
-                            style: {
-                                display: "block",
-                                marginBottom: 12,
-                                fontWeight: 600,
-                                fontSize: 16,
-                                color: isDark ? "#ffffff" : "#374151",
-                            }
-                        }, "Codigo / contexto para analise"),
-                        React.createElement("textarea", {
-                            key: "textarea",
-                            value: codeInput,
-                            onChange: (e) => setCodeInput(e.target.value),
-                            placeholder: "Cole aqui o codigo quando o prompt pedir analise ou refatoracao...",
-                            style: {
-                                width: "100%",
-                                minHeight: 140,
-                                padding: 16,
-                                border: `2px solid ${isDark ? "#374151" : "#d1d5db"}`,
-                                borderRadius: 8,
-                                background: isDark ? "#374151" : "#ffffff",
-                                color: isDark ? "#ffffff" : "#1f2937",
-                                fontSize: 14,
-                                resize: "vertical",
-                                fontFamily: "monospace",
+                                fontFamily: "Monaco, 'Bitstream Vera Sans Mono', 'Lucida Console', Terminal, monospace",
                                 outline: "none",
                             }
                         })

@@ -1,10 +1,20 @@
 import type { IntentDefinition } from "./intentCatalog.js";
+import { applyIntentPrioritizationMatrix } from "./intentPrioritizationMatrix.js";
 
 export interface ClassificationTrace {
   intent_scores: Record<string, number>;
   negative_penalties: Record<string, number>;
   boosts: Record<string, number>;
   final_scores: Record<string, number>;
+  prioritization?: {
+    priority_intent?: string;
+    domain_weight?: number;
+    verb_weight?: number;
+    context_weight?: number;
+    boosts: Record<string, number>;
+    penalties: Record<string, number>;
+    reasons: string[];
+  };
   ambiguity_detected?: boolean;
   confidence_gap?: number;
   action_intent?: string;
@@ -64,6 +74,16 @@ export function applyIntentScoring(input: {
     final_scores.api_design = Number(Math.max(0, final_scores.api_design + conditionalPenalty).toFixed(4));
   }
 
+  const prioritization = applyIntentPrioritizationMatrix(input.prompt);
+  for (const [intent, boost] of Object.entries(prioritization.boosts)) {
+    boosts[intent] = Number(((boosts[intent] ?? 0) + boost).toFixed(4));
+    final_scores[intent] = Number(Math.max(0, (final_scores[intent] ?? 0) + boost).toFixed(4));
+  }
+  for (const [intent, penalty] of Object.entries(prioritization.penalties)) {
+    negative_penalties[intent] = Number(((negative_penalties[intent] ?? 0) + penalty).toFixed(4));
+    final_scores[intent] = Number(Math.max(0, (final_scores[intent] ?? 0) + penalty).toFixed(4));
+  }
+
   const maxScore = Math.max(0.0001, ...Object.values(final_scores));
   for (const [intent, score] of Object.entries(final_scores)) {
     final_scores[intent] = Number((score / maxScore).toFixed(4));
@@ -74,5 +94,6 @@ export function applyIntentScoring(input: {
     negative_penalties,
     boosts,
     final_scores,
+    prioritization,
   };
 }

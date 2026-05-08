@@ -7,6 +7,7 @@ import { enforceLearningBoundaries } from "../../spec/learning/learningBoundaryE
 import { validateProviderModel } from "../../governance/providers/providerRegistry.js";
 import { classifyProviderError } from "../../governance/providers/providerErrorTaxonomy.js";
 import { JsonStabilityError, parseStableJson } from "../../ai/json/llmRetryController.js";
+import { compileSchemaAwarePrompt } from "../../ai/prompt/schemaAwarePromptCompiler.js";
 import { enforceSchemaAuthority, SchemaAuthorityError } from "../../spec/contracts/schemaAuthorityGuard.js";
 import { resolveSafeFallbackTemplate } from "../../spec/templates/safeFallbackResolver.js";
 import {
@@ -16,6 +17,10 @@ import {
   validateSemanticContent,
   validateStrictOutputTypes,
 } from "../../spec/governance/semanticGovernance.js";
+import { hydrateInlineCodeBeforeRuntimeGate } from "../../spec/governance/runtimeInputHydration.js";
+import { guardInputFieldInference } from "../../spec/inputFieldInferenceGuard.js";
+import { resolveCodeContext } from "../../context/codeContextResolver.js";
+import { extractInlineCode } from "../../context/inlineCodeExtractor.js";
 import { getProviderHealth, recordProviderFailure } from "../../governance/providers/providerGovernance.js";
 
 const GOLDEN_CASES = [
@@ -76,6 +81,18 @@ const GOLDEN_CASES = [
     input: "quero refatorar meu c\u00f3digo com boas pr\u00e1ticas",
     expected_intent: "code_refactor",
     must_contain: ["refactor_plan", "module_boundaries", "tests"],
+  },
+  {
+    input: "refatore os endpoints dessa api sem mudar o contrato",
+    expected_intent: "code_refactor",
+    must_not_match: ["api_design", "general_spec"],
+    must_contain: ["refactor_plan", "module_boundaries", "tests"],
+  },
+  {
+    input: "reestruturar modulo legado e remover duplicacao",
+    expected_intent: "code_refactor",
+    must_not_match: ["api_design", "code_analysis"],
+    must_contain: ["refactor_plan", "compatibility_notes", "tests"],
   },
   {
     input: "quero ver vulnerabilidades no meu c\u00f3digo",
@@ -140,9 +157,291 @@ export function runGoldenSuite(): { passed: boolean; failures: string[] } {
     failures.push("quota_error_not_reliability_failure: expected quota_exceeded without reliability impact");
   }
 
-  const analyzeClassification = classifyPromptDetailed("analise o meu codigo");
+  const analyzeClassification = classifyPromptDetailed("codigo analise avaliar");
   if (!analyzeClassification.classification_trace.ambiguity_detected || analyzeClassification.classification_trace.action_intent !== "code_analysis") {
     failures.push("analyze_code_gap_resolution: expected ambiguity trace resolved by action router");
+  }
+
+  const refactorClassification = classifyPromptDetailed("refatore os endpoints dessa api sem mudar o contrato");
+  if (refactorClassification.semantic_intent !== "code_refactor") {
+    failures.push("refactor_intent_priority_must_override_api_terms: expected code_refactor for refactor API prompt");
+  }
+  if (refactorClassification.classification_trace.prioritization?.priority_intent !== "code_refactor") {
+    failures.push("refactor_intent_priority_must_be_auditable: missing code_refactor prioritization trace");
+  }
+  if ((refactorClassification.classification_trace.negative_penalties.api_design ?? 0) >= 0) {
+    failures.push("refactor_intent_priority_must_penalize_api_design: missing api_design penalty");
+  }
+
+  const refactorTemplate = selectTemplate("code_refactor");
+  const compiledRefactorPrompt = compileSchemaAwarePrompt({
+    sourceRequest: "refatore esse codigo para melhorar a legibilidade",
+    semanticIntent: "code_refactor",
+    templateId: refactorTemplate.id,
+    inputFields: refactorTemplate.contract.input_fields,
+    outputFields: refactorTemplate.contract.output_fields as any,
+    strictJson: true,
+  }).compiledPrompt;
+  for (const expected of [
+    "refactor_plan must be an array",
+    "compatibility_notes must be an array",
+    "tests must be an array",
+    "module_boundaries must be an object",
+    "Return only JSON",
+    "Root object must contain only content",
+    "Do not include prompt_spec",
+    "Do not include metadata",
+  ]) {
+    if (!compiledRefactorPrompt.includes(expected)) {
+      failures.push(`schema_aware_prompt_code_refactor_contract: missing '${expected}'`);
+    }
+  }
+
+  const analysisTemplate = selectTemplate("code_analysis");
+  const compiledAnalysisPrompt = compileSchemaAwarePrompt({
+    sourceRequest: "quero que vc analise esse codigo",
+    semanticIntent: "code_analysis",
+    templateId: analysisTemplate.id,
+    inputFields: analysisTemplate.contract.input_fields,
+    outputFields: analysisTemplate.contract.output_fields as any,
+    strictJson: true,
+  }).compiledPrompt;
+  for (const expected of [
+    "strengths must be an array",
+    "good_practices must be an array",
+    "weaknesses must be an array",
+    "improvement_opportunities must be an array",
+    "maintainability_score must be a number",
+  ]) {
+    if (!compiledAnalysisPrompt.includes(expected)) {
+      failures.push(`schema_aware_prompt_code_analysis_contract: missing '${expected}'`);
+    }
+  }
+
+  const refactorInputTemplate = selectTemplate("code_refactor");
+  const weakInference = guardInputFieldInference({
+    sourceRequest: "refatore esse codigo para melhorar a legibilidade",
+    semanticIntent: "code_refactor",
+    domain: "code",
+    task: "refactor",
+    templateInputFields: refactorInputTemplate.contract.input_fields,
+    candidateFields: [
+      {
+        fieldName: "code",
+        fieldType: "string",
+        description: "Code inferred from weak keyword",
+        sourceKeyword: "esse",
+        reason: "learned_domain_keyword",
+        confidence: 0.41,
+      },
+      {
+        fieldName: "component_name",
+        fieldType: "string",
+        description: "Component inferred from weak keyword",
+        sourceKeyword: "para",
+        reason: "learned_domain_keyword",
+        confidence: 0.35,
+      },
+      {
+        fieldName: "language",
+        fieldType: "string",
+        description: "Language inferred from weak keyword",
+        sourceKeyword: "esse",
+        reason: "learned_domain_keyword",
+        confidence: 0.41,
+      },
+    ],
+  });
+  if (Object.keys(weakInference.acceptedFields).length > 0) {
+    failures.push("input_field_guard_must_reject_weak_stopword_candidates: weak candidates accepted");
+  }
+  for (const keyword of ["esse", "para"]) {
+    if (!weakInference.inferenceAudit.blocked_keywords.includes(keyword)) {
+      failures.push(`input_field_guard_must_audit_blocked_keyword: missing '${keyword}'`);
+    }
+  }
+  for (const field of ["code_area", "goals"]) {
+    if (!refactorInputTemplate.contract.input_fields[field]) {
+      failures.push(`input_field_guard_must_keep_template_fields_for_code_refactor: missing '${field}'`);
+    }
+  }
+
+  const languageInference = guardInputFieldInference({
+    sourceRequest: "refatore esse controller em TypeScript",
+    semanticIntent: "code_refactor",
+    domain: "code",
+    task: "refactor",
+    templateInputFields: refactorInputTemplate.contract.input_fields,
+    candidateFields: [
+      {
+        fieldName: "language",
+        fieldType: "string",
+        description: "Programming language explicitly mentioned by the user",
+        sourceKeyword: "TypeScript",
+        reason: "explicit_language_signal",
+        confidence: 0.91,
+      },
+    ],
+  });
+  if (!languageInference.acceptedFields.language) {
+    failures.push("input_field_guard_must_accept_explicit_language_signal: language rejected");
+  }
+  if (!languageInference.inferenceAudit.accepted.some((item) => item.reason === "explicit_language_signal")) {
+    failures.push("input_field_guard_must_audit_explicit_language_signal: reason missing");
+  }
+
+  const scopeInference = guardInputFieldInference({
+    sourceRequest: "analise esse codigo focando em seguranca",
+    semanticIntent: "code_analysis",
+    domain: "code",
+    task: "analyze",
+    templateInputFields: { code: analysisTemplate.contract.input_fields.code, language: analysisTemplate.contract.input_fields.language },
+    candidateFields: [
+      {
+        fieldName: "analysis_scope",
+        fieldType: "string",
+        description: "Analysis focus explicitly mentioned by the user",
+        sourceKeyword: "seguranca",
+        reason: "explicit_analysis_scope_signal",
+        confidence: 0.87,
+      },
+    ],
+  });
+  if (!scopeInference.acceptedFields.analysis_scope) {
+    failures.push("input_field_guard_must_accept_explicit_analysis_scope: analysis_scope rejected");
+  }
+
+  const syntheticContext = resolveCodeContext({
+    sourceRequest: "refatore o auth controller",
+    semanticIntent: "code_refactor",
+    workspaceFiles: [
+      {
+        path: "src/controllers/auth.controller.ts",
+        content: "import { AuthService } from '../services/auth.service';\nexport class AuthController { constructor(private auth: AuthService) {} }",
+      },
+      {
+        path: "src/services/auth.service.ts",
+        content: "export class AuthService { login() { return true; } }",
+      },
+      {
+        path: "src/services/billing.service.ts",
+        content: "export class BillingService {}",
+      },
+    ],
+  });
+  const selectedSyntheticFiles = syntheticContext.selectedFiles.map((file) => file.path);
+  for (const expected of ["src/controllers/auth.controller.ts", "src/services/auth.service.ts"]) {
+    if (!selectedSyntheticFiles.includes(expected)) {
+      failures.push(`code_context_resolver_must_select_related_refactor_files: missing '${expected}'`);
+    }
+  }
+  if (syntheticContext.tokenEstimate >= 12000) {
+    failures.push("code_pack_builder_must_limit_codepack_size: token estimate exceeded limit");
+  }
+
+  const promptWithCodeContext = compileSchemaAwarePrompt({
+    sourceRequest: "refatore esse endpoint",
+    semanticIntent: "code_refactor",
+    templateId: refactorTemplate.id,
+    inputFields: refactorTemplate.contract.input_fields,
+    outputFields: refactorTemplate.contract.output_fields as any,
+    strictJson: true,
+    codeContext: syntheticContext.codePack,
+  }).compiledPrompt;
+  if (!promptWithCodeContext.includes("CODE_CONTEXT")) {
+    failures.push("schema_aware_prompt_must_inject_code_context: CODE_CONTEXT missing");
+  }
+
+  const markdownInline = extractInlineCode("refatore esse codigo para melhorar a legibilidade\n```ts\nfunction test() { return true; }\n```", "code_refactor");
+  if (!markdownInline.hasInlineCode || markdownInline.inlineFiles[0]?.virtualPath !== "inline_prompt_1.ts") {
+    failures.push("inline_code_extractor_must_detect_markdown_typescript_block: inline ts block not detected");
+  }
+  const markdownContext = resolveCodeContext({
+    sourceRequest: "refatore esse codigo para melhorar a legibilidade\n```ts\nfunction test() { return true; }\n```",
+    semanticIntent: "code_refactor",
+    workspaceFiles: [],
+  });
+  if (!markdownContext.selectedFiles.some((file) => file.path === "inline_prompt_1.ts")) {
+    failures.push("inline_code_context_must_select_virtual_markdown_file: inline_prompt_1.ts missing");
+  }
+
+  const refactorGateHydrated = hydrateInlineCodeBeforeRuntimeGate({
+    sourceRequest: "refatore esse codigo\n```ts\nfunction test() { return true; }\n```",
+    semanticIntent: "code_refactor",
+    inputs: {},
+  });
+  try {
+    validateContextualInputs("code_refactor", refactorGateHydrated.inputs);
+  } catch {
+    failures.push("inline_code_pre_gate_must_allow_code_refactor_with_inline_code: gate blocked hydrated code");
+  }
+  if (!refactorGateHydrated.hydrated || refactorGateHydrated.inputs.code_source !== "inline_prompt") {
+    failures.push("inline_code_pre_gate_must_add_inline_metadata_for_code_refactor: metadata missing");
+  }
+
+  const singleInputRefactor = hydrateInlineCodeBeforeRuntimeGate({
+    sourceRequest: "refatore esse codigo para melhorar a legibilidade\n\nfunction processarUsuarios(users: any[]) { let resultado: any[] = []; return resultado; }",
+    semanticIntent: "code_refactor",
+    inputs: {},
+  });
+  try {
+    validateContextualInputs("code_refactor", singleInputRefactor.inputs);
+  } catch {
+    failures.push("single_input_refactor_with_inline_code_must_pass_gate: gate blocked unified prompt");
+  }
+  if (!singleInputRefactor.hydrated || !singleInputRefactor.inlineFiles.includes("inline_prompt_1.ts")) {
+    failures.push("single_input_refactor_with_inline_code_must_create_inline_file: inline file missing");
+  }
+
+  const refactorGateMissing = hydrateInlineCodeBeforeRuntimeGate({
+    sourceRequest: "refatore esse codigo para melhorar a legibilidade",
+    semanticIntent: "code_refactor",
+    inputs: {},
+  });
+  try {
+    validateContextualInputs("code_refactor", refactorGateMissing.inputs);
+    failures.push("inline_code_pre_gate_must_keep_blocking_code_refactor_without_code: missing code accepted");
+  } catch (error) {
+    if (!(error instanceof SemanticGovernanceError) || error.errorCode !== "missing_required_input") {
+      failures.push("inline_code_pre_gate_must_keep_blocking_code_refactor_without_code: wrong error type");
+    }
+  }
+
+  const analysisGateHydrated = hydrateInlineCodeBeforeRuntimeGate({
+    sourceRequest: "analise esse codigo\nconst total: number = 1;\nfunction sum() { return total; }",
+    semanticIntent: "code_analysis",
+    inputs: {},
+  });
+  try {
+    validateContextualInputs("code_analysis", analysisGateHydrated.inputs);
+  } catch {
+    failures.push("inline_code_pre_gate_must_allow_code_analysis_with_inline_code: gate blocked hydrated code");
+  }
+
+  const plainSnippetContext = resolveCodeContext({
+    sourceRequest: "refatore esse codigo\nfunction processarUsuarios(users: any[]) { let resultado = []; return resultado; }",
+    semanticIntent: "code_refactor",
+    workspaceFiles: [],
+  });
+  if (!plainSnippetContext.inline.hasInlineCode || plainSnippetContext.inline.languages[0] !== "typescript") {
+    failures.push("inline_code_extractor_must_detect_plain_typescript_snippet: plain snippet not detected as typescript");
+  }
+  if (plainSnippetContext.selectedFiles.length !== 1 || plainSnippetContext.selectedFiles[0].path !== "inline_prompt_1.ts") {
+    failures.push("inline_code_context_must_build_codepack_from_plain_snippet: virtual file missing");
+  }
+
+  const jsonInline = extractInlineCode('refatore esse json\n{"active_port":3000,"server_status":"running"}', "code_refactor");
+  if (!jsonInline.hasInlineCode || jsonInline.inlineFiles[0]?.language !== "json" || jsonInline.inlineFiles[0]?.virtualPath !== "inline_prompt_1.json") {
+    failures.push("inline_code_extractor_must_detect_json_payload: json payload not detected");
+  }
+
+  const noInline = resolveCodeContext({
+    sourceRequest: "refatore esse codigo para melhorar a legibilidade",
+    semanticIntent: "code_refactor",
+    workspaceFiles: [],
+  });
+  if (noInline.inline.hasInlineCode || noInline.selectedFiles.length !== 0) {
+    failures.push("inline_code_extractor_must_not_detect_plain_prompt_as_code: plain prompt detected as code");
   }
 
   const frontendClassification = classifyPromptDetailed("create frontend component with database tables and indexes");
@@ -282,7 +581,7 @@ export function runGoldenSuite(): { passed: boolean; failures: string[] } {
     }
   }
 
-  const closeGap = classifyPromptDetailed("analise o meu codigo");
+  const closeGap = classifyPromptDetailed("codigo analise avaliar");
   if (!closeGap.classification_trace.ambiguity_detected || closeGap.semantic_intent !== "code_analysis") {
     failures.push("confidence_gap_below_threshold_should_trigger_safe_intent: safe resolution not applied");
   }

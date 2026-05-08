@@ -17,6 +17,8 @@ export interface ClassificationResult {
   classification_decision?: {
     domain?: string;
     task?: string;
+    priority_intent?: string;
+    prioritization_reasons?: string[];
     ambiguity_detected?: boolean;
     confidence_gap?: number;
     decision_reason?: string;
@@ -77,6 +79,8 @@ export function classifyPromptDetailed(prompt: string): ClassificationResult {
     classification_decision: {
       domain: semantic.classificationTrace.domain,
       task: semantic.classificationTrace.task,
+      priority_intent: semantic.classificationTrace.prioritization?.priority_intent,
+      prioritization_reasons: semantic.classificationTrace.prioritization?.reasons,
       ambiguity_detected: semantic.classificationTrace.ambiguity_detected,
       confidence_gap: semantic.classificationTrace.confidence_gap,
       decision_reason: semantic.classificationTrace.decision_reason,

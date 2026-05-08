@@ -25,9 +25,12 @@ import { resolveUserOverride } from "../governance/providers/userOverrideResolve
 import { validateSpecSafety } from "../governance/safety/safetyEngine.js";
 import { enforceLearningBoundaries } from "../spec/learning/learningBoundaryEngine.js";
 import { buildJsonRetryInstruction, JsonStabilityError, parseStableJson } from "../ai/json/llmRetryController.js";
+import { compileSchemaAwarePrompt } from "../ai/prompt/schemaAwarePromptCompiler.js";
 import { injectLlmContentIntoSpec } from "../spec/contracts/llmContentExtractor.js";
 import { assertSystemOwnedStructure, enforceSchemaAuthority, SchemaAuthorityError } from "../spec/contracts/schemaAuthorityGuard.js";
 import { shouldBlockHeuristicFieldInference, validateSemanticContent, validateStrictOutputTypes, SemanticGovernanceError } from "../spec/governance/semanticGovernance.js";
+import { guardInputFieldInference, type CandidateInputField } from "../spec/inputFieldInferenceGuard.js";
+import { resolveCodeContext } from "../context/codeContextResolver.js";
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL;
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
@@ -180,7 +183,43 @@ function analyzePatterns(): void {
   });
 }
 
-function improveWithLearning(baseSpec: PromptSpec, prompt: string): { improvedSpec: PromptSpec; improvements: string[] } {
+function buildExplicitInputCandidates(prompt: string): CandidateInputField[] {
+  const normalized = prompt
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  const candidates: CandidateInputField[] = [];
+
+  for (const language of ["typescript", "javascript", "react", "node"]) {
+    if (normalized.includes(language)) {
+      candidates.push({
+        fieldName: "language",
+        fieldType: "string",
+        description: "Programming language or framework explicitly mentioned by the user",
+        sourceKeyword: language,
+        reason: "explicit_language_signal",
+        confidence: 0.91,
+      });
+    }
+  }
+
+  for (const scope of ["performance", "seguranca", "security", "legibilidade", "readability", "qualidade"]) {
+    if (normalized.includes(scope)) {
+      candidates.push({
+        fieldName: "analysis_scope",
+        fieldType: "string",
+        description: "Analysis focus explicitly mentioned by the user",
+        sourceKeyword: scope,
+        reason: "explicit_analysis_scope_signal",
+        confidence: 0.87,
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function improveWithLearning(baseSpec: PromptSpec, prompt: string, classification?: ClassificationResult): { improvedSpec: PromptSpec; improvements: string[] } {
   const improvements: string[] = [];
   let improvedSpec = { ...baseSpec };
 
@@ -197,6 +236,7 @@ function improveWithLearning(baseSpec: PromptSpec, prompt: string): { improvedSp
   // Apply high-quality input patterns from history
   const promptWords = prompt.toLowerCase().split(/\s+/);
   const relevantKeywords = promptWords.filter(word => learningPatterns.domain_keywords[word]);
+  const candidateInputFields: CandidateInputField[] = [];
 
   relevantKeywords.forEach(keyword => {
     learningPatterns.domain_keywords[keyword].forEach(field => {
@@ -205,12 +245,37 @@ function improveWithLearning(baseSpec: PromptSpec, prompt: string): { improvedSp
         const patternKey = Object.keys(learningPatterns.high_quality_input_patterns).find(key => key.startsWith(`${field}:`));
         if (patternKey) {
           const type = patternKey.split(':')[1];
-          improvedSpec.input_fields[field] = { type, description: `Input field for ${field} based on learned patterns` };
-          improvements.push(`Added input field '${field}' from domain keyword '${keyword}'`);
+          candidateInputFields.push({
+            fieldName: field,
+            fieldType: type,
+            description: `Input field for ${field} based on learned patterns`,
+            sourceKeyword: keyword,
+            reason: "learned_domain_keyword",
+            confidence: 0.58,
+          });
         }
       }
     });
   });
+  candidateInputFields.push(...buildExplicitInputCandidates(prompt));
+
+  if (candidateInputFields.length > 0) {
+    const guarded = guardInputFieldInference({
+      sourceRequest: prompt,
+      semanticIntent: classification?.semantic_intent ?? "general_spec",
+      domain: classification?.classification_decision?.domain ?? "unknown",
+      task: classification?.classification_decision?.task ?? "unknown",
+      templateInputFields: baseSpec.input_fields,
+      candidateFields: candidateInputFields,
+    });
+    improvedSpec.input_fields = { ...improvedSpec.input_fields, ...guarded.acceptedFields };
+    for (const accepted of guarded.inferenceAudit.accepted) {
+      improvements.push(`Accepted input field '${accepted.fieldName}' from '${accepted.sourceKeyword}' (${accepted.reason})`);
+    }
+    for (const rejected of guarded.rejectedFields) {
+      improvements.push(`Rejected input field '${rejected.fieldName}' from '${rejected.sourceKeyword}' (${rejected.reason})`);
+    }
+  }
 
   // Enhance output fields with high-quality patterns
   Object.keys(learningPatterns.high_quality_output_patterns).forEach(pattern => {
@@ -1565,32 +1630,6 @@ function withCompletionTimeout<T>(promise: Promise<T>, backend: string, timeoutM
 }
 
 export async function promptToSpec(prompt: string, context?: string, preferredBackend: string = "auto", strictJson: boolean = false): Promise<CompletionResult & { spec: NormalizedSpec; ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean }; confidence: ConfidenceReport; quality_breakdown: QualityBreakdown; classification_trace?: ClassificationResult["classification_trace"]; fallback_info: FallbackInfo } & ProviderRuntimeInfo> {
-  const createUserPrompt = (attempt: number, previousErrors: string[], contentFields: string[] = []) => {
-    const basePrompt = [`Raw prompt:\n${prompt}`];
-    if (context?.trim()) {
-      basePrompt.push(`Context:\n${context.trim()}`);
-    }
-    basePrompt.push([
-      "System-selected content fields:",
-      JSON.stringify(contentFields),
-      "Return exactly this root shape:",
-      JSON.stringify({ content: Object.fromEntries(contentFields.map((field) => [field, "content for this field"])) }, null, 2),
-      "Do not add, remove, rename, or define fields.",
-    ].join("\n"));
-
-    let retryHint = "";
-    if (attempt > 1) {
-      const errorSummary = previousErrors.length > 0 ? ` Errors: ${previousErrors.join("; ")}` : "";
-      if (attempt === 2) {
-        retryHint = `\n\nCRITICAL: Previous attempt failed validation${errorSummary}. Return ONLY the content object. Do not define schema, intent, or template. Do not use markdown fences.`;
-      } else if (attempt === 3) {
-        retryHint = `\n\nFINAL ATTEMPT: Previous attempts failed${errorSummary}. Return ONLY this exact JSON structure with the same content keys: {"content":{}}. No explanations, no markdown, no schema.`;
-      }
-    }
-
-    return `${basePrompt.join("\n\n")}${retryHint}`;
-  };
-
   const generateContextAwareFallback = (): PromptSpec => {
     const normalizedPrompt = prompt.trim().replace(/\s+/g, " ");
     const lowerPrompt = normalizedPrompt.toLowerCase();
@@ -1810,6 +1849,17 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
     }, trace);
   }
 
+  const shouldInjectCodeContext = ["code_refactor", "code_analysis", "api_design"].includes(classification.semantic_intent);
+  const codeContext = shouldInjectCodeContext
+    ? resolveCodeContext({
+        sourceRequest: prompt,
+        semanticIntent: classification.semantic_intent,
+        workspaceRoot: process.cwd(),
+        maxCodePackTokens: 12000,
+        trace,
+      })
+    : { selectedFiles: [], dependencyMap: {}, codePack: "", tokenEstimate: 0 };
+
   let lastError = "";
   let rawAiResponse = "";
   let parsedSpec: unknown = null;
@@ -1839,9 +1889,22 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
       for (let attempt = 1; attempt <= maxProviderAttempts; attempt += 1) {
         const attemptStartedAt = Date.now();
         try {
+          const compiled = compileSchemaAwarePrompt({
+            sourceRequest: prompt,
+            semanticIntent: classification.semantic_intent,
+            templateId: template.id,
+            inputFields: template.contract.input_fields,
+            outputFields: template.contract.output_fields as any,
+            strictJson: true,
+            context,
+            codeContext: codeContext.codePack,
+            previousErrors: [lastError].filter(Boolean),
+            attempt,
+            trace,
+          });
           const completion = await withCompletionTimeout(createCompletion([
           { role: "system", content: CONTENT_ONLY_INSTRUCTION },
-          { role: "user", content: createUserPrompt(attempt, [lastError], template.outputs).trim() },
+          { role: "user", content: compiled.compiledPrompt.trim() },
         ], client, modelCandidate), backend.provider, providerPolicy.timeoutMs);
         if (backend.provider === "gemini") {
           markProviderModelAvailable("gemini");
@@ -1877,7 +1940,7 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
           reason: "llm_response_received",
         }, trace);
         if (validationResult.valid) {
-          const { improvedSpec, improvements } = improveWithLearning(baseSpec, prompt);
+          const { improvedSpec, improvements } = improveWithLearning(baseSpec, prompt, classification);
           const boundary = enforceLearningBoundaries(improvedSpec, classification.semantic_intent);
           if (boundary.violations.length > 0) {
             logEvent("warn", "learning_boundary_enforced", {

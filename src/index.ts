@@ -15,6 +15,7 @@ import { GEMINI_DEFAULT_MODEL, validateProviderModel } from "./governance/provid
 import { getAllProviderStates } from "./governance/providers/providerState.js";
 import { classifyPromptDetailed } from "./ai/router/semanticClassifier.js";
 import { SemanticGovernanceError, validateContextualInputs } from "./spec/governance/semanticGovernance.js";
+import { hydrateInlineCodeBeforeRuntimeGate } from "./spec/governance/runtimeInputHydration.js";
 
 logEvent("info", "server_starting", { service: "MCP Prompt Spec API" });
 
@@ -251,13 +252,18 @@ app.post("/prompt-to-spec", async (req: Request, res: Response, next: NextFuncti
     }
 
     const preflightClassification = classifyPromptDetailed(prompt);
+    const hydratedInputs = hydrateInlineCodeBeforeRuntimeGate({
+      sourceRequest: prompt,
+      semanticIntent: preflightClassification.semantic_intent,
+      inputs,
+    });
     logEvent("info", "state_machine_transition", {
       from: "classification_layer",
       to: "classified",
       intent: preflightClassification.semantic_intent,
     });
     try {
-      validateContextualInputs(preflightClassification.semantic_intent, inputs);
+      validateContextualInputs(preflightClassification.semantic_intent, hydratedInputs.inputs);
     } catch (error) {
       if (error instanceof SemanticGovernanceError) {
         incrementMetric("runtime_blocks_total");
