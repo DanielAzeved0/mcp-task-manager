@@ -1,9 +1,6 @@
-import { execSync } from 'child_process';
 import { geminiClient, ollamaClient } from "../utils/geminiClient.js";
 import { classifyPromptDetailed, type ClassificationResult, type PromptComplexity } from "../utils/promptClassifier.js";
 import { promptSpecSchema, PromptSpec } from "../schemas/promptSpec.js";
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import { buildSpecFromTemplate } from "../spec/builder/specBuilder.js";
 import { calculateConfidence, calculateQualityBreakdown, type ConfidenceReport, type QualityBreakdown } from "../spec/confidence/confidenceEngine.js";
 import { isCanonicalField, validateSchemaCompatibility } from "../spec/contracts/canonicalFields.js";
@@ -11,7 +8,9 @@ import { createDeterministicPlan, parsePlanDocument } from "../spec/planner/plan
 import { selectTemplate } from "../spec/templates/registry.js";
 import { resolveTemplateComposition } from "../spec/templates/composition.js";
 import { resolveSafeFallbackTemplate, type SafeFallbackResolution, type FallbackReason } from "../spec/templates/safeFallbackResolver.js";
+import { resolveFallbackReason } from "../spec/templates/fallbackOrchestrator.js";
 import { SemanticCache } from "../cache/semantic/semanticCache.js";
+import { shouldWriteSemanticCache } from "../cache/semantic/cachePolicy.js";
 import { createTraceContext, logEvent } from "../observability/logger.js";
 import { incrementMetric, observeMetric } from "../observability/metrics.js";
 import { resolveExecutionPolicy, riskAllowsProvider, type ExecutionPolicy } from "../governance/policies/policyEngine.js";
@@ -21,6 +20,7 @@ import { classifyProviderError, type ProviderErrorClassification } from "../gove
 import { getAllProviderStates, getProviderState, markProviderModelAvailable, updateProviderStateFromError, type ProviderCapabilityState } from "../governance/providers/providerState.js";
 import { buildGeminiModelFailoverChain, shouldTryNextGeminiModel, type ModelFailoverEvent } from "../ai/providers/modelFailover.js";
 import { probeGeminiModelAvailability } from "../ai/providers/startupProbe.js";
+import { createCompletion, getProviderExecutionPolicy, resolveOllamaModel, withCompletionTimeout } from "../ai/providers/providerExecutor.js";
 import { resolveUserOverride } from "../governance/providers/userOverrideResolver.js";
 import { validateSpecSafety } from "../governance/safety/safetyEngine.js";
 import { enforceLearningBoundaries } from "../spec/learning/learningBoundaryEngine.js";
@@ -31,6 +31,8 @@ import { assertSystemOwnedStructure, enforceSchemaAuthority, SchemaAuthorityErro
 import { shouldBlockHeuristicFieldInference, validateSemanticContent, validateStrictOutputTypes, SemanticGovernanceError } from "../spec/governance/semanticGovernance.js";
 import { guardInputFieldInference, type CandidateInputField } from "../spec/inputFieldInferenceGuard.js";
 import { resolveCodeContext } from "../context/codeContextResolver.js";
+import { addToHistory, getLearningPatterns } from "../learning/history/specHistoryStore.js";
+export { getLearningStats, updateSpecFeedback } from "../learning/history/specHistoryStore.js";
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL;
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2";
@@ -47,7 +49,6 @@ const PROVIDER_EXECUTION_POLICIES = {
     maxOutputTokens: Number(process.env.GEMINI_MAX_OUTPUT_TOKENS) || 2048,
   },
 };
-const HISTORY_FILE = join(process.cwd(), 'promptSpecHistory.json');
 const semanticSpecCache = new SemanticCache<NormalizedSpec>();
 const startupGeminiValidation = probeGeminiModelAvailability(GEMINI_MODEL);
 export const ACTIVE_GEMINI_MODEL = startupGeminiValidation.selected_model;
@@ -55,132 +56,6 @@ if (!startupGeminiValidation.valid) {
   logEvent("error", "provider_model_invalid", { provider: "gemini", model: GEMINI_MODEL, issues: startupGeminiValidation.issues, phase: "startup", model_failover_trace: startupGeminiValidation.model_failover_trace });
 } else {
   logEvent("info", "provider_model_validated", { provider: "gemini", model: ACTIVE_GEMINI_MODEL, phase: "startup", model_failover_trace: startupGeminiValidation.model_failover_trace });
-}
-
-interface SpecHistoryEntry {
-  id: string;
-  prompt: string;
-  generated_spec: PromptSpec;
-  quality_score: number;
-  feedback_score: number;
-  timestamp: string;
-  iterations: number;
-  backend_used: string;
-}
-
-interface LearningPatterns {
-  high_quality_input_patterns: Record<string, number>;
-  high_quality_output_patterns: Record<string, number>;
-  low_quality_patterns: string[];
-  domain_keywords: Record<string, string[]>;
-}
-
-let specHistory: SpecHistoryEntry[] = [];
-let learningPatterns: LearningPatterns = {
-  high_quality_input_patterns: {},
-  high_quality_output_patterns: {},
-  low_quality_patterns: [],
-  domain_keywords: {}
-};
-
-function loadHistory(): void {
-  try {
-    if (existsSync(HISTORY_FILE)) {
-      const data = readFileSync(HISTORY_FILE, 'utf8');
-      specHistory = JSON.parse(data);
-      analyzePatterns();
-    }
-  } catch (error) {
-    logEvent("warn", "learning_history_load_failed", { reason: error instanceof Error ? error.message : String(error) });
-    specHistory = [];
-  }
-}
-
-function saveHistory(): void {
-  try {
-    writeFileSync(HISTORY_FILE, JSON.stringify(specHistory, null, 2));
-  } catch (error) {
-    logEvent("warn", "learning_history_save_failed", { reason: error instanceof Error ? error.message : String(error) });
-  }
-}
-
-function addToHistory(entry: Omit<SpecHistoryEntry, 'id' | 'timestamp'>): void {
-  const newEntry: SpecHistoryEntry = {
-    ...entry,
-    id: Date.now().toString(),
-    timestamp: new Date().toISOString()
-  };
-  specHistory.push(newEntry);
-
-  // Keep only last 1000 entries
-  if (specHistory.length > 1000) {
-    specHistory = specHistory.slice(-1000);
-  }
-
-  saveHistory();
-  analyzePatterns();
-}
-
-function analyzePatterns(): void {
-  const highQualitySpecs = specHistory.filter(entry => entry.quality_score >= 7);
-  const lowQualitySpecs = specHistory.filter(entry => entry.quality_score < 5);
-
-  // Reset patterns
-  learningPatterns = {
-    high_quality_input_patterns: {},
-    high_quality_output_patterns: {},
-    low_quality_patterns: [],
-    domain_keywords: {}
-  };
-
-  // Analyze high quality patterns
-  highQualitySpecs.forEach(spec => {
-    // Input patterns
-    Object.keys(spec.generated_spec.input_fields).forEach(field => {
-      const type = (spec.generated_spec.input_fields[field] as any)?.type;
-      if (type) {
-        const key = `${field}:${type}`;
-        learningPatterns.high_quality_input_patterns[key] = (learningPatterns.high_quality_input_patterns[key] || 0) + 1;
-      }
-    });
-
-    // Output patterns
-    Object.keys(spec.generated_spec.output_fields).forEach(field => {
-      const type = (spec.generated_spec.output_fields[field] as any)?.type;
-      if (type) {
-        const key = `${field}:${type}`;
-        learningPatterns.high_quality_output_patterns[key] = (learningPatterns.high_quality_output_patterns[key] || 0) + 1;
-      }
-    });
-
-    // Domain keywords
-    const words = spec.prompt.toLowerCase().split(/\s+/);
-    words.forEach(word => {
-      if (word.length > 3) {
-        if (!learningPatterns.domain_keywords[word]) {
-          learningPatterns.domain_keywords[word] = [];
-        }
-        Object.keys(spec.generated_spec.input_fields).forEach(field => {
-          if (!learningPatterns.domain_keywords[word].includes(field)) {
-            learningPatterns.domain_keywords[word].push(field);
-          }
-        });
-      }
-    });
-  });
-
-  // Analyze low quality patterns
-  lowQualitySpecs.forEach(spec => {
-    if (Object.keys(spec.generated_spec.input_fields).length === 0) {
-      learningPatterns.low_quality_patterns.push('empty_input_fields');
-    }
-    if (Object.keys(spec.generated_spec.output_fields).length === 0) {
-      learningPatterns.low_quality_patterns.push('empty_output_fields');
-    }
-    if (Object.keys(spec.generated_spec.output_fields).includes('result')) {
-      learningPatterns.low_quality_patterns.push('generic_result_output');
-    }
-  });
 }
 
 function buildExplicitInputCandidates(prompt: string): CandidateInputField[] {
@@ -234,6 +109,7 @@ function improveWithLearning(baseSpec: PromptSpec, prompt: string, classificatio
   }
 
   // Apply high-quality input patterns from history
+  const learningPatterns = getLearningPatterns();
   const promptWords = prompt.toLowerCase().split(/\s+/);
   const relevantKeywords = promptWords.filter(word => learningPatterns.domain_keywords[word]);
   const candidateInputFields: CandidateInputField[] = [];
@@ -324,40 +200,6 @@ function improveWithLearning(baseSpec: PromptSpec, prompt: string, classificatio
   }
 
   return { improvedSpec, improvements };
-}
-
-// Load history on module load
-loadHistory();
-
-export function updateSpecFeedback(specId: string, feedbackScore: number): boolean {
-  const entry = specHistory.find(e => e.id === specId);
-  if (entry) {
-    entry.feedback_score = feedbackScore;
-    saveHistory();
-    analyzePatterns(); // Re-analyze with new feedback
-    return true;
-  }
-  return false;
-}
-
-export function getLearningStats(): { totalSpecs: number; averageQuality: number; topPatterns: Record<string, number> } {
-  const total = specHistory.length;
-  const averageQuality = total > 0 ? specHistory.reduce((sum, entry) => sum + entry.quality_score, 0) / total : 0;
-
-  // Get top input patterns
-  const topInputPatterns: Record<string, number> = {};
-  Object.entries(learningPatterns.high_quality_input_patterns)
-    .sort(([,a], [,b]) => b - a)
-    .slice(0, 5)
-    .forEach(([key, count]) => {
-      topInputPatterns[key] = count;
-    });
-
-  return {
-    totalSpecs: total,
-    averageQuality: Math.round(averageQuality * 10) / 10,
-    topPatterns: topInputPatterns
-  };
 }
 
 export { enforceQualityStandards, calculateQualityScore };
@@ -1313,58 +1155,6 @@ Return ONLY this JSON structure:
 
 MANDATORY: Return ONLY the JSON object, no explanations or text outside JSON.`;
 
-function getAvailableOllamaModels(): string[] {
-  try {
-    const output = execSync('ollama list', { encoding: 'utf8', timeout: 3000 });
-    // Parse output: skip header, extract first column (NAME)
-    const lines = output.trim().split('\n').slice(1);
-    return lines.map(line => line.trim().split(/\s+/)[0]).filter(Boolean);
-  } catch (error) {
-    logEvent("warn", "ollama_models_unavailable", { reason: error instanceof Error ? error.message : String(error) });
-    return [];
-  }
-}
-
-function resolveOllamaModel(configuredModel: string): { resolvedModel: string; status: 'valid' | 'corrected' | 'fallback'; availableModels: string[] } {
-  const availableModels = getAvailableOllamaModels();
-
-  if (availableModels.length === 0) {
-    throw new Error('No Ollama models installed. Please install models using "ollama pull <model>" and ensure Ollama is running.');
-  }
-
-  const normalizedConfigured = configuredModel.toLowerCase().trim();
-
-  // Exact match
-  if (availableModels.includes(configuredModel)) {
-    logEvent("debug", "ollama_model_validated", { configuredModel, resolvedModel: configuredModel, status: "valid" });
-    return { resolvedModel: configuredModel, status: 'valid', availableModels };
-  }
-
-  // Partial match (starts with or contains)
-  const partialMatch = availableModels.find(model =>
-    model.toLowerCase().startsWith(normalizedConfigured) ||
-    model.toLowerCase().includes(normalizedConfigured)
-  );
-  if (partialMatch) {
-    logEvent("debug", "ollama_model_validated", { configuredModel, resolvedModel: partialMatch, status: "corrected" });
-    return { resolvedModel: partialMatch, status: 'corrected', availableModels };
-  }
-
-  // If no tag provided, try appending :latest
-  if (!configuredModel.includes(':')) {
-    const withLatest = `${configuredModel}:latest`;
-    if (availableModels.includes(withLatest)) {
-      logEvent("debug", "ollama_model_validated", { configuredModel, resolvedModel: withLatest, status: "corrected" });
-      return { resolvedModel: withLatest, status: 'corrected', availableModels };
-    }
-  }
-
-  // Fallback to first available model
-  const fallbackModel = availableModels[0];
-  logEvent("warn", "ollama_model_fallback", { configuredModel, resolvedModel: fallbackModel, status: "fallback", availableModels });
-  return { resolvedModel: fallbackModel, status: 'fallback', availableModels };
-}
-
 type CompletionResult = {
   content: string;
   tokens: number;
@@ -1505,128 +1295,6 @@ function selectBackend(preferredBackend: string = "auto", prompt: string = ""): 
 
   addDeterministic();
   return { candidates, classification, policy };
-}
-
-function resolveFallbackReason(lastError: string, candidates: BackendCandidate[]): FallbackReason {
-  if (!lastError.trim()) return "no_candidate_backend";
-  if (candidates.length === 0) return "no_candidate_backend";
-  const errorClassification = classifyProviderError(lastError);
-  if (errorClassification.type === "model_deprecated") return "provider_model_deprecated";
-  if (errorClassification.type === "quota_exceeded") return "provider_quota_exceeded";
-  if (errorClassification.type === "auth_error") return "provider_api_key_invalid";
-  if (errorClassification.type === "timeout") return "provider_timeout";
-  if (errorClassification.type === "health_error") return "provider_health_invalid";
-  if (errorClassification.type === "malformed_response") return "schema_validation_failed";
-  const normalized = lastError.toLowerCase();
-  if (normalized.includes("timed out")) return "provider_timeout";
-  if (normalized.includes("health")) return "provider_health_invalid";
-  if (normalized.includes("confidence")) return "low_confidence";
-  if (normalized.includes("validation") || normalized.includes("schema") || normalized.includes("json")) return "schema_validation_failed";
-  if (normalized.includes("api key") || normalized.includes("unauthorized") || normalized.includes("permission")) return "provider_api_key_invalid";
-  return "schema_validation_failed";
-}
-
-async function createCompletion(messages: Array<{ role: "system" | "user"; content: string }>, client: any, modelOverride?: string): Promise<CompletionResult> {
-  if (!client) {
-    throw new Error("No AI client available for completion.");
-  }
-
-  if (client === ollamaClient) {
-    if (!ollamaClient) {
-      throw new Error("Ollama client not available.");
-    }
-
-    // Resolve and validate Ollama model
-    const { resolvedModel, status, availableModels } = resolveOllamaModel(OLLAMA_MODEL);
-
-    // Convert messages to Ollama format
-    const prompt = messages.map(msg => {
-      if (msg.role === "system") return `System: ${msg.content}`;
-      if (msg.role === "user") return `User: ${msg.content}`;
-      return msg.content;
-    }).join("\n\n");
-
-    const stream = ollamaClient.generate(resolvedModel, prompt, {
-      parameters: {
-        temperature: 0.2,
-        top_k: 40,
-        top_p: 0.9,
-        num_predict: PROVIDER_EXECUTION_POLICIES.llama.maxOutputTokens,
-      } as any
-    });
-
-    let content = "";
-    for await (const chunk of stream) {
-      content += chunk;
-    }
-
-    if (!content) {
-      throw new Error("Ollama returned an empty completion.");
-    }
-
-    const tokens = Math.ceil(content.length / 4); // Rough estimation
-
-    return {
-      content,
-      tokens,
-      model: resolvedModel
-    };
-  }
-
-  if (client === geminiClient) {
-    if (!geminiClient) {
-      throw new Error("Gemini client not available.");
-    }
-
-    const selectedModel = modelOverride || ACTIVE_GEMINI_MODEL;
-    const model = geminiClient.getGenerativeModel({
-      model: selectedModel,
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: PROVIDER_EXECUTION_POLICIES.gemini.maxOutputTokens,
-      },
-    });
-
-    const prompt = messages.map(msg => {
-      if (msg.role === "system") return `System: ${msg.content}`;
-      if (msg.role === "user") return `User: ${msg.content}`;
-      return msg.content;
-    }).join("\n\n");
-
-    const completion = await model.generateContent(prompt);
-    const content = completion.response.text();
-    if (!content) {
-      throw new Error("Gemini returned an empty completion.");
-    }
-
-    const tokens = Math.ceil(content.length / 4);
-
-    return { content, tokens, model: selectedModel };
-  }
-
-  throw new Error("Unsupported AI client.");
-}
-
-function getProviderExecutionPolicy(backend: string) {
-  return backend === "gemini" ? PROVIDER_EXECUTION_POLICIES.gemini : PROVIDER_EXECUTION_POLICIES.llama;
-}
-
-function withCompletionTimeout<T>(promise: Promise<T>, backend: string, timeoutMs: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error(`${backend} completion timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    promise
-      .then((value) => {
-        clearTimeout(timeout);
-        resolve(value);
-      })
-      .catch((error) => {
-        clearTimeout(timeout);
-        reject(error);
-      });
-  });
 }
 
 export async function promptToSpec(prompt: string, context?: string, preferredBackend: string = "auto", strictJson: boolean = false): Promise<CompletionResult & { spec: NormalizedSpec; ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean }; confidence: ConfidenceReport; quality_breakdown: QualityBreakdown; classification_trace?: ClassificationResult["classification_trace"]; fallback_info: FallbackInfo } & ProviderRuntimeInfo> {
@@ -1868,7 +1536,7 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
   for (const candidate of candidates) {
     const { client, backend } = candidate;
     if (candidate.deterministic) continue;
-    const providerPolicy = getProviderExecutionPolicy(backend.provider);
+    const providerPolicy = getProviderExecutionPolicy(backend.provider, PROVIDER_EXECUTION_POLICIES);
     const maxProviderAttempts = Math.max(3, Math.min(Math.max(MAX_GENERATION_ATTEMPTS, policy.retries), providerPolicy.maxRetries + 1));
     const modelChain = backend.provider === "gemini" ? buildGeminiModelFailoverChain(backend.model) : [backend.model];
 
@@ -1905,7 +1573,12 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
           const completion = await withCompletionTimeout(createCompletion([
           { role: "system", content: CONTENT_ONLY_INSTRUCTION },
           { role: "user", content: compiled.compiledPrompt.trim() },
-        ], client, modelCandidate), backend.provider, providerPolicy.timeoutMs);
+        ], client, {
+          activeGeminiModel: ACTIVE_GEMINI_MODEL,
+          ollamaModel: OLLAMA_MODEL,
+          policies: PROVIDER_EXECUTION_POLICIES,
+          modelOverride: modelCandidate,
+        }), backend.provider, providerPolicy.timeoutMs);
         if (backend.provider === "gemini") {
           markProviderModelAvailable("gemini");
           modelFailoverTrace.push({ provider: "gemini", model: modelCandidate, action: "selected" });
@@ -1994,7 +1667,7 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
           });
 
           const normalizedSpec = normalizeSpec(finalSpec);
-          if (!backend.fallback_used && ["gemini", "llama"].includes(backend.provider) && confidence.semantic_alignment >= 8 && confidence.template_alignment >= 8) {
+          if (shouldWriteSemanticCache({ provider: backend.provider, fallbackUsed: backend.fallback_used, semanticPrecisionScore: confidence.semantic_alignment, intentMatchScore: confidence.template_alignment })) {
             semanticSpecCache.set(cachePrompt, cachePrompt, normalizedSpec);
           } else {
             incrementMetric("semantic_cache_poison_prevention_count");
@@ -2330,7 +2003,11 @@ export async function improveSpec(spec: unknown, issues: string[] = [], context?
         role: "user",
         content: `Current spec: ${JSON.stringify(safeSpec, null, 2)}\n\nValidation issues:\n${problemSummary}`,
       },
-    ], client), backend.provider, getProviderExecutionPolicy(backend.provider).timeoutMs);
+    ], client, {
+      activeGeminiModel: ACTIVE_GEMINI_MODEL,
+      ollamaModel: OLLAMA_MODEL,
+      policies: PROVIDER_EXECUTION_POLICIES,
+    }), backend.provider, getProviderExecutionPolicy(backend.provider, PROVIDER_EXECUTION_POLICIES).timeoutMs);
   } catch (error) {
     logEvent("warn", "fallback_triggered", { stage: "improve_spec", reason: error instanceof Error ? error.message : String(error) });
     const promptSpecValidation = promptSpecSchema.safeParse(spec);

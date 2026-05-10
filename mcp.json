@@ -1,55 +1,40 @@
 {
-  "name": "task-manager",
+  "name": "mcp-prompt-generator",
   "version": "1.0.0",
-  "type": "mcp",
+  "type": "web-app",
   "language": "typescript",
-  "description": "Interactive task management MCP server with widgets",
+  "description": "Semantic governed runtime for generating structured Prompt SPECs from natural language, inline code, JSON, and project context.",
   "author": {
     "name": "Daniel Azevedo",
     "email": "daniel.azevedo@gmail.com"
   },
   "repository": {
     "type": "git",
-    "url": "https://https://github.com/DanielAzeved0/mcp-task-manager"
+    "url": "https://github.com/DanielAzeved0/mcp-task-manager"
   },
-  "keywords": ["mcp", "task-manager", "productivity", "widgets"],
-  "tools": [
+  "keywords": [
+    "prompt-generator",
+    "spec-generation",
+    "semantic-classification",
+    "schema-enforcement",
+    "gemini",
+    "ollama"
+  ],
+  "endpoints": [
     {
-      "name": "create_task",
-      "description": "Create a new task"
+      "method": "POST",
+      "path": "/prompt-to-spec",
+      "description": "Generate a governed PromptSpecResponse from a user prompt."
     },
     {
-      "name": "list_tasks",
-      "description": "List tasks with interactive widget"
-    },
-    {
-      "name": "update_task",
-      "description": "Update an existing task"
-    },
-    {
-      "name": "delete_task",
-      "description": "Delete a task"
-    },
-    {
-      "name": "get_statistics",
-      "description": "Get task statistics"
+      "method": "GET",
+      "path": "/health",
+      "description": "Return backend health, provider state, and active model information."
     }
   ],
-  "widgets": [
-    {
-      "id": "task-widget",
-      "name": "Task List",
-      "description": "Interactive task list with filters and priorities"
-    },
-    {
-      "id": "statistics-widget",
-      "name": "Statistics",
-      "description": "Task statistics and completion metrics"
-    },
-    {
-      "id": "prompt-widget",
-      "name": "Prompt Generator",
-      "description": "Convert natural language prompts to structured Prompt Specifications"
-    }
-  ]
+  "frontend": {
+    "type": "static",
+    "entry": "public/index.html",
+    "description": "Single-input web UI for prompts, inline code, JSON, and context."
+  }
 }
