@@ -1,5 +1,6 @@
 import { analyzeSemanticIntent } from "../classifier/semanticIntentEngine.js";
 import type { ClassificationTrace } from "../classifier/classificationScoring.js";
+import { normalizeIntentTypos } from "../classifier/intentTypoNormalizer.js";
 
 export type PromptComplexity = "simple" | "medium" | "complex" | "critical";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
@@ -44,8 +45,10 @@ function riskFromScore(score: number): RiskLevel {
 }
 
 export function classifyPromptDetailed(prompt: string): ClassificationResult {
-  const semantic = analyzeSemanticIntent(prompt);
-  const structuralComplexity = estimateStructuralComplexity(prompt);
+  const typoNormalization = normalizeIntentTypos(prompt);
+  const classificationPrompt = typoNormalization.normalizedPrompt;
+  const semantic = analyzeSemanticIntent(classificationPrompt);
+  const structuralComplexity = estimateStructuralComplexity(classificationPrompt);
   const secondaryRiskBias = Math.max(0, ...semantic.secondary.map((match) => match.riskBias * Math.max(0.4, match.similarity)));
   const riskScore = clampScore(semantic.primary.riskBias + secondaryRiskBias + structuralComplexity * 0.65);
   const risk_level = riskFromScore(riskScore);
@@ -75,7 +78,14 @@ export function classifyPromptDetailed(prompt: string): ClassificationResult {
       `route:${routing_recommendation}`,
       ...semantic.secondary.map((match) => `secondary:${match.intent}:${match.similarity}`),
     ],
-    classification_trace: semantic.classificationTrace,
+    classification_trace: {
+      ...semantic.classificationTrace,
+      intent_typo_normalization: {
+        normalization_applied: typoNormalization.normalizationApplied,
+        normalized_terms: typoNormalization.normalizedTerms,
+        normalized_prompt: typoNormalization.normalizationApplied ? classificationPrompt : undefined,
+      },
+    },
     classification_decision: {
       domain: semantic.classificationTrace.domain,
       task: semantic.classificationTrace.task,

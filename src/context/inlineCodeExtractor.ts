@@ -11,6 +11,8 @@ export interface InlineCodeFile extends WorkspaceFile {
 export interface InlineCodeExtractionResult {
   hasInlineCode: boolean;
   inlineFiles: InlineCodeFile[];
+  naturalLanguagePrompt: string;
+  inlineCode: string;
   extractionAudit: {
     detectedPatterns: string[];
     rejectedCandidates: Array<{ reason: string; preview: string }>;
@@ -70,6 +72,50 @@ function sourceSignalCount(content: string): number {
     .filter((signal) => normalized.includes(signal)).length;
 }
 
+function compactNaturalLanguagePrompt(content: string): string {
+  return content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function removeRanges(source: string, ranges: Array<{ start: number; end: number }>): string {
+  if (ranges.length === 0) return source;
+  let cursor = 0;
+  let result = "";
+  for (const range of [...ranges].sort((a, b) => a.start - b.start)) {
+    result += source.slice(cursor, range.start);
+    cursor = Math.max(cursor, range.end);
+  }
+  result += source.slice(cursor);
+  return result;
+}
+
+function looksLikeSourceLine(line: string): boolean {
+  const normalized = normalize(line.trim());
+  return /^(function|const|let|var|class|interface|type|export|import|return)\b/.test(normalized)
+    || normalized.includes("=>")
+    || /[{};]/.test(normalized);
+}
+
+function splitPlainSourceSnippet(content: string): { naturalLanguagePrompt: string; code: string } | null {
+  const lines = content.split(/\r?\n/);
+  const startIndex = lines.findIndex((line, index) => {
+    if (!looksLikeSourceLine(line)) return false;
+    const candidate = lines.slice(index).join("\n").trim();
+    return candidate.length >= MINIMUM_CODE_LENGTH && sourceSignalCount(candidate) >= 2;
+  });
+
+  if (startIndex === -1) return null;
+
+  return {
+    naturalLanguagePrompt: compactNaturalLanguagePrompt(lines.slice(0, startIndex).join("\n")),
+    code: lines.slice(startIndex).join("\n").trim(),
+  };
+}
+
 function extractJsonCandidate(sourceRequest: string): string | null {
   const start = sourceRequest.indexOf("{");
   const end = sourceRequest.lastIndexOf("}");
@@ -102,6 +148,8 @@ export function extractInlineCode(sourceRequest: string, semanticIntent: string,
   const inlineFiles: InlineCodeFile[] = [];
   const detectedPatterns: string[] = [];
   const rejectedCandidates: Array<{ reason: string; preview: string }> = [];
+  const removedRanges: Array<{ start: number; end: number }> = [];
+  const inlineCodeParts: string[] = [];
 
   for (const match of sourceRequest.matchAll(MARKDOWN_BLOCK_RE)) {
     if (inlineFiles.length >= MAX_INLINE_FILES) break;
@@ -113,26 +161,37 @@ export function extractInlineCode(sourceRequest: string, semanticIntent: string,
     }
     detectedPatterns.push(`markdown_code_block:${language}`);
     inlineFiles.push(makeInlineFile(inlineFiles.length + 1, language, content, 0.98));
+    inlineCodeParts.push(content);
+    removedRanges.push({
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + match[0].length,
+    });
   }
 
-  const withoutMarkdown = sourceRequest.replace(MARKDOWN_BLOCK_RE, " ");
+  const withoutMarkdown = removeRanges(sourceRequest, removedRanges);
+  let naturalLanguagePrompt = compactNaturalLanguagePrompt(withoutMarkdown);
   if (inlineFiles.length < MAX_INLINE_FILES) {
     const jsonCandidate = extractJsonCandidate(withoutMarkdown);
     if (jsonCandidate && jsonCandidate.length >= 8) {
       detectedPatterns.push("json_payload");
       inlineFiles.push(makeInlineFile(inlineFiles.length + 1, "json", jsonCandidate, 0.9));
+      inlineCodeParts.push(jsonCandidate);
+      naturalLanguagePrompt = compactNaturalLanguagePrompt(withoutMarkdown.replace(jsonCandidate, " "));
     }
   }
 
   if (inlineFiles.length < MAX_INLINE_FILES) {
-    const signalCount = sourceSignalCount(withoutMarkdown);
-    const normalized = withoutMarkdown.trim();
-    if (signalCount >= 2 && normalized.length >= MINIMUM_CODE_LENGTH) {
-      const language = inferLanguage(normalized);
+    const splitSnippet = splitPlainSourceSnippet(naturalLanguagePrompt);
+    const candidate = splitSnippet?.code ?? naturalLanguagePrompt.trim();
+    const signalCount = sourceSignalCount(candidate);
+    if (signalCount >= 2 && candidate.length >= MINIMUM_CODE_LENGTH) {
+      const language = inferLanguage(candidate);
       detectedPatterns.push(`plain_source_snippet:${language}`);
-      inlineFiles.push(makeInlineFile(inlineFiles.length + 1, language, normalized, 0.85));
+      inlineFiles.push(makeInlineFile(inlineFiles.length + 1, language, candidate, 0.85));
+      inlineCodeParts.push(candidate);
+      naturalLanguagePrompt = splitSnippet ? splitSnippet.naturalLanguagePrompt : "";
     } else if (signalCount > 0) {
-      rejectedCandidates.push({ reason: "insufficient_source_signals_or_length", preview: normalized.slice(0, 80) });
+      rejectedCandidates.push({ reason: "insufficient_source_signals_or_length", preview: candidate.slice(0, 80) });
     }
   }
 
@@ -159,6 +218,8 @@ export function extractInlineCode(sourceRequest: string, semanticIntent: string,
   return {
     hasInlineCode: inlineFiles.length > 0,
     inlineFiles,
+    naturalLanguagePrompt,
+    inlineCode: inlineCodeParts.join("\n\n"),
     extractionAudit: {
       detectedPatterns,
       rejectedCandidates,

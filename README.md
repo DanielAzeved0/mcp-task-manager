@@ -19,7 +19,11 @@ O runtime atual inclui:
 - runtime input gate antes da chamada de LLM;
 - hidratacao pre-gate com codigo inline colado no prompt;
 - extracao de snippets markdown, TypeScript, JavaScript e JSON;
+- analise AST-aware compacta para TypeScript/JavaScript;
 - injecao de contexto real do workspace quando arquivos relevantes existem;
+- busca semantica local em memoria para selecionar arquivos relacionados;
+- hidratacao de contexto entre requests da mesma sessao;
+- roteamento por complexidade e promocao de Gemini para intents de codigo;
 - prompt compiler consciente de schema;
 - guardas contra override estrutural da LLM;
 - pipeline de JSON estrito;
@@ -36,6 +40,12 @@ O runtime atual inclui:
 - **Inline Code Pre-Gate Hydration**: extrai codigo do prompt antes do gate e preenche `inputs.code`.
 - **Inline Code Extraction**: cria arquivos virtuais como `inline_prompt_1.ts` ou `inline_prompt_1.json`.
 - **Code Context Injection**: seleciona arquivos do workspace, dependencias e snippets inline para montar `CODE_CONTEXT`.
+- **Embedding-Based Context Engine**: usa um vector store local em memoria para encontrar arquivos semanticamente relacionados, como autenticacao -> auth/JWT/session/user.
+- **Semantic Noise Reduction**: ignora tokens genericos de codigo como `function`, `return`, `if`, `any`, `length`, `map` e evita selecionar arquivos internos do runtime para snippets inline simples.
+- **AST-Aware Semantic Analysis**: detecta funcoes, classes, interfaces, imports, exports, metricas e code smells antes da LLM.
+- **Complexity Routing**: usa metricas AST para ordenar candidates entre `deterministic_builder`, Llama/Ollama e Gemini.
+- **Intent-Aware Backend Promotion**: promove Gemini para `code_refactor`, `code_analysis` e `architecture_design` quando ha AST, contexto semantico ou contexto hidratado de sessao.
+- **Multi-Request Context Hydration**: permite enviar codigo em uma request e pedir a acao na seguinte, como `agora refatore isso`.
 - **Input Field Inference Guard**: impede que stopwords como `esse`, `para` e `quero` criem campos tecnicos indevidos.
 - **Schema-Aware Prompt Compiler**: injeta contrato tipado, exemplo valido e regras negativas no prompt da LLM.
 - **Strict Contract Enforcement**: a LLM deve retornar somente `{ "content": { ... } }`.
@@ -58,18 +68,20 @@ flowchart TD
   F -->|inputs validos| G["Template Registry / Composition"]
   F -->|missing_required_input| X["422 deterministic error"]
   G --> H["Code Context Resolver"]
-  H --> I["Dependency Scanner"]
-  I --> J["Code Pack Builder"]
-  J --> K["Schema-Aware Prompt Compiler"]
-  K --> L["Backend Router + Provider Governance"]
-  L --> M["Gemini / Llama-Ollama"]
-  L --> N["Deterministic Builder"]
-  M --> O["JSON Stability Engine"]
-  O --> P["Schema Authority Guard"]
-  P --> Q["Normalizer + Semantic Governance"]
-  Q --> R["Quality and Confidence Engines"]
-  N --> R
-  R --> S["PromptSpecResponse"]
+  H --> I["Inline Context Isolation + Embedding Context Engine"]
+  I --> J["Dependency Scanner + Code Pack Builder"]
+  J --> K["AST-Aware Semantic Analysis"]
+  K --> L["Schema-Aware Prompt Compiler"]
+  L --> M["Complexity Routing + Intent-Aware Backend Promotion"]
+  M --> N["Provider Governance + Model Failover"]
+  N --> O["Gemini / Llama-Ollama"]
+  N --> P["Deterministic Builder"]
+  O --> Q["JSON Stability Engine"]
+  Q --> R["Schema Authority Guard"]
+  R --> S["Normalizer + Semantic Governance"]
+  S --> T["Quality and Confidence Engines"]
+  P --> T
+  T --> U["PromptSpecResponse"]
 ```
 
 ## Fluxo de Execucao
@@ -82,15 +94,20 @@ flowchart TD
 6. O runtime gate bloqueia apenas quando nao ha campo explicito nem codigo inline suficiente.
 7. O sistema seleciona o template da SPEC e preserva campos definidos pelo template.
 8. O code context resolver procura arquivos reais relacionados e mescla snippets inline.
-9. O code pack builder monta um `CODE_CONTEXT` compacto com limite de tokens.
-10. O schema-aware prompt compiler gera um prompt content-only com contrato tipado.
-11. Gemini ou Llama/Ollama recebe apenas instrucao para preencher conteudo.
-12. A resposta da LLM passa pelo JSON stability engine.
-13. O schema authority guard impede override estrutural.
-14. O sistema injeta o conteudo no schema controlado pelo template.
-15. A SPEC e normalizada, validada e pontuada.
-16. Se um provider falhar, o fallback deterministico usa template seguro por intent.
-17. A API retorna `PromptSpecResponse` com backend, fallback, qualidade, validacao e metadados.
+9. Se houver codigo inline simples, o resolver isola esse snippet e bloqueia contaminacao por arquivos internos do runtime.
+10. Quando nao ha inline code suficiente, o embedding context engine usa similaridade semantica local para encontrar arquivos relacionados.
+11. O code pack builder monta um `CODE_CONTEXT` compacto com limite de tokens.
+12. O AST analyzer calcula simbolos, metricas e smells do codigo selecionado.
+13. O complexity router usa metricas AST para ordenar candidates.
+14. O intent-aware backend promotion promove Gemini para intents de codigo/arquitetura com contexto real.
+15. O prompt compiler injeta `CODE_CONTEXT`, `AST_SEMANTIC_ANALYSIS`, contrato estrutural e limites compactos.
+16. Gemini ou Llama/Ollama recebe apenas instrucao para preencher conteudo.
+17. A resposta da LLM passa pelo JSON stability engine.
+18. O schema authority guard impede override estrutural.
+19. O sistema injeta o conteudo no schema controlado pelo template.
+20. A SPEC e normalizada, validada e pontuada.
+21. Se um provider falhar, o fallback deterministico usa template seguro por intent.
+22. A API retorna `PromptSpecResponse` com backend, fallback, qualidade, validacao e metadados.
 
 ## Interface
 
@@ -145,7 +162,34 @@ Com esse input, o backend deve:
 - preencher `inputs.code` com `code_source: "inline_prompt"`;
 - satisfazer o runtime gate;
 - injetar `CODE_CONTEXT` no prompt enviado ao provider;
+- injetar `AST_SEMANTIC_ANALYSIS` com metricas e smells;
+- promover Gemini quando a decisao envolve codigo com AST/contexto real;
 - gerar uma SPEC de refatoracao seguindo o template `code_refactor`.
+
+Fluxo multi-request suportado:
+
+```ts
+// request 1
+function processarUsuarios(users: any[]) {
+  let resultado: any[] = [];
+  return resultado;
+}
+
+// request 2, na mesma sessao
+agora refatore isso
+```
+
+Nesse caso, o runtime hidrata `inputs.code` a partir do ultimo codigo inline relevante e retorna:
+
+```json
+{
+  "session_context": {
+    "hydrated": true,
+    "source": "recent_inline_code",
+    "selected_context": ["inline_prompt_1.ts"]
+  }
+}
+```
 
 ## Resposta Esperada
 
@@ -180,6 +224,20 @@ A resposta segue o contrato `PromptSpecResponse`. Exemplo resumido:
   "fallback": {
     "used_fallback": false,
     "fallback_type": "none"
+  },
+  "complexity_routing": {
+    "score": 0.42,
+    "level": "medium",
+    "selected_backend": "gemini",
+    "reasons": ["ast_analysis_context"]
+  },
+  "semantic_context": {
+    "enabled": true,
+    "matches": []
+  },
+  "session_context": {
+    "hydrated": false,
+    "selected_context": []
   }
 }
 ```
@@ -290,18 +348,30 @@ src/
     json/                      Sanitizacao, extracao, reparo e retry de JSON
     prompt/                    Schema-aware prompt compiler
     providers/                 Startup probe, failover e execucao de providers
-    router/                    Classificador semantico e grafo de execucao
+    router/                    Classificador semantico, complexity routing e backend promotion
   cache/
     semantic/                  Cache semantico e politica de escrita segura
     embeddings/                Embeddings locais e similaridade
+  analysis/
+    astAnalyzer.ts             Extrai simbolos e monta AST_SEMANTIC_ANALYSIS
+    codeMetrics.ts             Calcula metricas estruturais de codigo
+    codeSmellDetector.ts       Detecta smells como any, nesting e nomes genericos
   learning/
     history/                   Historico persistente e padroes aprendidos
   context/
     inlineCodeExtractor.ts     Extrai codigo colado no prompt
     codeContextResolver.ts     Seleciona arquivos relevantes
+    embeddingContextEngine.ts  Busca semantica local de arquivos relacionados
+    vectorStore.ts             Vector store local em memoria
+    chunker.ts                 Divide arquivos em chunks indexaveis
+    contextIndexBuilder.ts     Monta indice semantico local
     dependencyScanner.ts       Mapeia imports e relacoes por nome
     codePackBuilder.ts         Monta CODE_CONTEXT com limite de tokens
     codeContextMerger.ts       Mescla arquivos reais e virtuais
+  session/
+    sessionContextStore.ts     Store em memoria por sessao
+    recentCodeMemory.ts        Guarda ultimo codigo inline relevante
+    contextHydrator.ts         Hidrata inputs.code em requests posteriores
   governance/
     providers/                 Estado, taxonomia e confiabilidade de providers
     policies/                  Politicas de execucao
@@ -455,7 +525,11 @@ Ela cobre:
 - input field inference guard;
 - code context resolver;
 - inline code extraction;
+- AST-aware semantic analysis;
 - schema-aware prompt compiler.
+- embedding context engine e reducao de ruido semantico;
+- complexity routing e intent-aware backend promotion;
+- multi-request context hydration.
 
 Valide tambem o build:
 
@@ -480,10 +554,24 @@ O backend usa logs estruturados JSON. Eventos importantes:
 - `input_field_candidate_accepted`
 - `input_field_candidate_rejected`
 - `code_context_resolution_started`
+- `semantic_context_index_built`
+- `semantic_context_match_selected`
+- `semantic_context_noise_suppressed`
 - `inline_code_detected`
 - `code_context_file_selected`
 - `code_pack_built`
+- `ast_analysis_started`
+- `ast_file_analyzed`
+- `code_metrics_generated`
+- `code_smells_detected`
+- `ast_analysis_completed`
+- `semantic_analysis_context_injected`
 - `code_context_injected`
+- `complexity_routing_completed`
+- `intent_aware_backend_promoted`
+- `intent_aware_backend_promotion_skipped`
+- `recent_code_memory_saved`
+- `session_context_hydrated`
 - `schema_prompt_compiled`
 - `json_sanitization_applied`
 - `schema_authority_enforced`
@@ -501,6 +589,10 @@ O endpoint `/health` retorna status do backend, providers, modelos e metricas em
 - `deterministic_builder` e sempre o ultimo candidato seguro.
 - Fallback nunca deve defaultar para `api_design`, `database_design` ou `architecture_design`.
 - Codigo inline deve ser hidratado antes do runtime gate quando a intent exige `code`.
+- Codigo enviado em request anterior pode hidratar `code_refactor` e `code_analysis` na mesma sessao.
+- Snippets inline simples nao devem selecionar arquivos internos do runtime por similaridade fraca.
+- Busca semantica deve priorizar entidades de dominio, nomes compostos, funcoes especificas e modulos reais.
+- Gemini deve ser promovido para intents de codigo/arquitetura quando existe AST, contexto semantico ou contexto hidratado.
 - Campos de input definidos pelo template sao preservados.
 - Campos inferidos exigem sinal semantico forte, compatibilidade por intent e score minimo.
 
@@ -519,9 +611,8 @@ npm run test:golden
 
 Proximos passos sugeridos, ainda nao implementados como capacidade completa:
 
-- analise AST-aware para TypeScript/JavaScript;
-- embeddings reais para ranking semantico de arquivos;
-- memoria de sessao entre requests;
+- embeddings neurais reais para substituir o provider local hash;
+- persistencia de memoria de sessao entre restarts;
 - contexto incremental por projeto;
 - metricas historicas por provider;
 - UI para visualizar trace, fallback reason e code context selecionado;

@@ -1,4 +1,5 @@
 import { logEvent, type TraceContext } from "../../observability/logger.js";
+import { resolveCompactOutputPolicy, type CompactOutputPolicy } from "./compactOutputPolicy.js";
 
 export interface FieldDefinition {
   type: string;
@@ -16,8 +17,10 @@ export interface SchemaAwarePromptCompilerInput {
   strictJson: boolean;
   context?: string;
   codeContext?: string;
+  semanticAnalysisContext?: string;
   previousErrors?: string[];
   attempt?: number;
+  compactOutputPolicy?: CompactOutputPolicy;
   trace?: TraceContext;
 }
 
@@ -155,8 +158,32 @@ export function compileSchemaAwarePrompt(input: SchemaAwarePromptCompilerInput):
     : "";
   const contextBlock = input.context?.trim() ? `\nAdditional context:\n${input.context.trim()}` : "";
   const codeContextBlock = input.codeContext?.trim() ? `\nCODE_CONTEXT:\n${input.codeContext.trim()}` : "";
+  const semanticAnalysisBlock = input.semanticAnalysisContext?.trim() ? `\n${input.semanticAnalysisContext.trim()}` : "";
   const typeRules = Object.values(structuralContract).map((field) => `- ${field.rule}`).join("\n");
   const forbiddenRules = forbiddenPatterns.map((pattern) => `- ${pattern}`).join("\n");
+  const estimatedPromptLength = [
+    input.sourceRequest,
+    contextBlock,
+    codeContextBlock,
+    semanticAnalysisBlock,
+    JSON.stringify(structuralContract),
+    JSON.stringify(validExample),
+  ].join("\n").length;
+  const compactOutputPolicy = input.compactOutputPolicy ?? resolveCompactOutputPolicy({
+    semanticIntent: input.semanticIntent,
+    codeContext: input.codeContext,
+    semanticAnalysisContext: input.semanticAnalysisContext,
+    estimatedPromptLength,
+    trace: input.trace,
+  });
+  const compactOutputBlock = compactOutputPolicy.enabled
+    ? [
+        "\nCOMPACT_OUTPUT_MODE:",
+        ...compactOutputPolicy.instructions.map((instruction) => `- ${instruction}`),
+        "Limits:",
+        JSON.stringify(compactOutputPolicy.limits, null, 2),
+      ].join("\n")
+    : "";
 
   const compiledPrompt = [
     "You are a content generator for an internal SPEC compiler.",
@@ -175,6 +202,8 @@ export function compileSchemaAwarePrompt(input: SchemaAwarePromptCompilerInput):
     input.sourceRequest,
     contextBlock,
     codeContextBlock,
+    semanticAnalysisBlock,
+    compactOutputBlock,
     previousErrorBlock,
     "",
     "Input fields selected by the system:",

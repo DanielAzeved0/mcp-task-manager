@@ -8,6 +8,10 @@ import { validateProviderModel } from "../../governance/providers/providerRegist
 import { classifyProviderError } from "../../governance/providers/providerErrorTaxonomy.js";
 import { JsonStabilityError, parseStableJson } from "../../ai/json/llmRetryController.js";
 import { compileSchemaAwarePrompt } from "../../ai/prompt/schemaAwarePromptCompiler.js";
+import { resolveCompactOutputPolicy } from "../../ai/prompt/compactOutputPolicy.js";
+import { routeByAstComplexity } from "../../ai/router/complexityRouter.js";
+import { applyComplexityBackendSelection } from "../../ai/router/backendSelectionPolicy.js";
+import { promoteBackendForIntentContext } from "../../ai/router/intentAwareBackendPromotion.js";
 import { enforceSchemaAuthority, SchemaAuthorityError } from "../../spec/contracts/schemaAuthorityGuard.js";
 import { resolveSafeFallbackTemplate } from "../../spec/templates/safeFallbackResolver.js";
 import {
@@ -22,6 +26,9 @@ import { guardInputFieldInference } from "../../spec/inputFieldInferenceGuard.js
 import { resolveCodeContext } from "../../context/codeContextResolver.js";
 import { extractInlineCode } from "../../context/inlineCodeExtractor.js";
 import { getProviderHealth, recordProviderFailure } from "../../governance/providers/providerGovernance.js";
+import { analyzeAst } from "../../analysis/astAnalyzer.js";
+import { rememberRecentInlineCode, getRecentCodeMemory } from "../../session/recentCodeMemory.js";
+import { hydrateSessionContext } from "../../session/contextHydrator.js";
 
 const GOLDEN_CASES = [
   {
@@ -171,6 +178,20 @@ export function runGoldenSuite(): { passed: boolean; failures: string[] } {
   }
   if ((refactorClassification.classification_trace.negative_penalties.api_design ?? 0) >= 0) {
     failures.push("refactor_intent_priority_must_penalize_api_design: missing api_design penalty");
+  }
+
+  const typoRefactorClassification = classifyPromptDetailed(
+    "refature esse codigo para melhorar a legibilidade\n\nfunction processarUsuario(user: any[]) { let resultado: any[] = []; return resultado; }",
+  );
+  if (typoRefactorClassification.semantic_intent !== "code_refactor") {
+    failures.push("normalizes_refature_to_code_refactor: expected code_refactor after typo normalization");
+  }
+  const typoTrace = typoRefactorClassification.classification_trace;
+  if (!typoTrace.intent_typo_normalization?.normalization_applied) {
+    failures.push("normalizes_refature_to_code_refactor: normalization trace missing");
+  }
+  if (!typoTrace.intent_typo_normalization?.normalized_terms.includes("refature->refatore")) {
+    failures.push("normalizes_refature_to_code_refactor: normalized term refature->refatore missing");
   }
 
   const refactorTemplate = selectTemplate("code_refactor");
@@ -339,6 +360,53 @@ export function runGoldenSuite(): { passed: boolean; failures: string[] } {
     failures.push("code_pack_builder_must_limit_codepack_size: token estimate exceeded limit");
   }
 
+  const semanticAuthContext = resolveCodeContext({
+    sourceRequest: "refatore autenticacao",
+    semanticIntent: "code_refactor",
+    workspaceFiles: [
+      {
+        path: "src/services/auth.service.ts",
+        content: "export class AuthService { login(credentials: Credentials) { return this.jwt.sign(credentials.user); } }",
+      },
+      {
+        path: "src/providers/jwt.provider.ts",
+        content: "export class JwtProvider { sign(user: User) { return 'token'; } verify(token: string) { return true; } }",
+      },
+      {
+        path: "src/repositories/user.repository.ts",
+        content: "export class UserRepository { findByEmail(email: string) { return null; } }",
+      },
+      {
+        path: "src/controllers/session.controller.ts",
+        content: "export class SessionController { createSession() { return true; } }",
+      },
+      {
+        path: "src/services/billing.service.ts",
+        content: "export class BillingService { createInvoice() { return true; } }",
+      },
+    ],
+  });
+  const semanticMatches = semanticAuthContext.semanticContext.matches.map((match) => match.path);
+  for (const expected of [
+    "src/services/auth.service.ts",
+    "src/providers/jwt.provider.ts",
+    "src/repositories/user.repository.ts",
+    "src/controllers/session.controller.ts",
+  ]) {
+    if (!semanticMatches.includes(expected)) {
+      failures.push(`embedding_context_engine_must_find_auth_related_files: missing '${expected}'`);
+    }
+  }
+  if (semanticAuthContext.semanticContext.matches.some((match) => match.path === "src/services/billing.service.ts" && match.score >= 0.7)) {
+    failures.push("embedding_context_engine_must_not_prioritize_unrelated_billing_file: billing matched too strongly");
+  }
+  if (!semanticAuthContext.semanticContext.matches.every((match) => match.reason === "semantic_similarity")) {
+    failures.push("embedding_context_engine_must_explain_semantic_similarity: reason missing");
+  }
+  if (!semanticAuthContext.selectedFiles.some((file) => file.path === "src/services/auth.service.ts" && file.reasons.includes("semantic_similarity"))) {
+    failures.push("embedding_context_engine_must_feed_code_context_selection: auth semantic match not selected");
+  }
+
   const promptWithCodeContext = compileSchemaAwarePrompt({
     sourceRequest: "refatore esse endpoint",
     semanticIntent: "code_refactor",
@@ -355,6 +423,9 @@ export function runGoldenSuite(): { passed: boolean; failures: string[] } {
   const markdownInline = extractInlineCode("refatore esse codigo para melhorar a legibilidade\n```ts\nfunction test() { return true; }\n```", "code_refactor");
   if (!markdownInline.hasInlineCode || markdownInline.inlineFiles[0]?.virtualPath !== "inline_prompt_1.ts") {
     failures.push("inline_code_extractor_must_detect_markdown_typescript_block: inline ts block not detected");
+  }
+  if (markdownInline.naturalLanguagePrompt.includes("function") || markdownInline.inlineCode.includes("refatore esse codigo")) {
+    failures.push("inline_code_extractor_must_separate_markdown_natural_language_from_code: prompt/code mixed");
   }
   const markdownContext = resolveCodeContext({
     sourceRequest: "refatore esse codigo para melhorar a legibilidade\n```ts\nfunction test() { return true; }\n```",
@@ -418,6 +489,68 @@ export function runGoldenSuite(): { passed: boolean; failures: string[] } {
     failures.push("inline_code_pre_gate_must_allow_code_analysis_with_inline_code: gate blocked hydrated code");
   }
 
+  const sessionId = "golden-user::session-context";
+  rememberRecentInlineCode({
+    sessionId,
+    sourceRequest: "function processarUsuarios(users: any[]) { let resultado: any[] = []; return resultado; }",
+    semanticIntent: "code_refactor",
+  });
+  const sessionHydrated = hydrateSessionContext({
+    sessionId,
+    sourceRequest: "agora refatore isso",
+    semanticIntent: "code_refactor",
+    inputs: {},
+  });
+  if (!sessionHydrated.sessionContext.hydrated || sessionHydrated.sessionContext.source !== "recent_inline_code") {
+    failures.push("multi_request_context_hydration_must_use_recent_inline_code: session context not hydrated");
+  }
+  if (!sessionHydrated.sessionContext.selected_context.includes("inline_prompt_1.ts")) {
+    failures.push("multi_request_context_hydration_must_select_recent_inline_file: inline_prompt_1.ts missing");
+  }
+  try {
+    validateContextualInputs("code_refactor", sessionHydrated.inputs);
+  } catch {
+    failures.push("multi_request_context_hydration_must_satisfy_runtime_gate: gate blocked hydrated session code");
+  }
+  const recentMemory = getRecentCodeMemory(sessionId);
+  const sessionContextResolution = resolveCodeContext({
+    sourceRequest: "agora refatore isso",
+    semanticIntent: "code_refactor",
+    workspaceFiles: [],
+    additionalFiles: recentMemory?.files,
+  });
+  if (!sessionContextResolution.selectedFiles.some((file) => file.path === "inline_prompt_1.ts")) {
+    failures.push("multi_request_context_hydration_must_feed_code_context: recent inline file not selected");
+  }
+
+  const noisyInlineExtraction = extractInlineCode(
+    [
+      "refature esse codigo para melhorar a legibilidade",
+      "",
+      "function processarUsuario(user: nay[]) {",
+      "  let code resultado: any[] = [];",
+      "  return resultado;",
+      "}",
+    ].join("\n"),
+    "code_refactor",
+  );
+  if (!noisyInlineExtraction.hasInlineCode) {
+    failures.push("code_aware_input_inference_isolation_must_detect_noisy_inline_code: inline code missing");
+  }
+  for (const expected of ["refature", "codigo", "legibilidade"]) {
+    if (!noisyInlineExtraction.naturalLanguagePrompt.includes(expected)) {
+      failures.push(`code_aware_input_inference_isolation_must_keep_natural_prompt_token: missing '${expected}'`);
+    }
+  }
+  for (const forbidden of ["function", "return", "any", "resultado", "processarUsuario"]) {
+    if (noisyInlineExtraction.naturalLanguagePrompt.includes(forbidden)) {
+      failures.push(`code_aware_input_inference_isolation_must_exclude_code_token: leaked '${forbidden}'`);
+    }
+  }
+  if (!noisyInlineExtraction.inlineCode.includes("processarUsuario") || noisyInlineExtraction.inlineCode.includes("refature esse codigo")) {
+    failures.push("code_aware_input_inference_isolation_must_keep_code_only_in_inline_code: code extraction incorrect");
+  }
+
   const plainSnippetContext = resolveCodeContext({
     sourceRequest: "refatore esse codigo\nfunction processarUsuarios(users: any[]) { let resultado = []; return resultado; }",
     semanticIntent: "code_refactor",
@@ -428,6 +561,216 @@ export function runGoldenSuite(): { passed: boolean; failures: string[] } {
   }
   if (plainSnippetContext.selectedFiles.length !== 1 || plainSnippetContext.selectedFiles[0].path !== "inline_prompt_1.ts") {
     failures.push("inline_code_context_must_build_codepack_from_plain_snippet: virtual file missing");
+  }
+  if (!plainSnippetContext.semanticAnalysisContext.includes("AST_SEMANTIC_ANALYSIS")) {
+    failures.push("ast_semantic_analysis_must_be_injected_for_inline_code: AST_SEMANTIC_ANALYSIS missing");
+  }
+  if (!plainSnippetContext.semanticAnalysis.symbols.functions.some((fn) => fn.name === "processarUsuarios")) {
+    failures.push("ast_analysis_must_detect_function_from_inline_code: processarUsuarios missing");
+  }
+  if (!plainSnippetContext.semanticAnalysis.smells.some((smell) => smell.type === "uses_any")) {
+    failures.push("ast_analysis_must_detect_any_usage_from_inline_code: uses_any missing");
+  }
+  if (!plainSnippetContext.semanticAnalysis.recommendation_signals.includes("add_explicit_types")) {
+    failures.push("ast_analysis_must_recommend_explicit_types: add_explicit_types missing");
+  }
+
+  const isolatedInlineContext = resolveCodeContext({
+    sourceRequest: "refatore esse codigo\n\nfunction processarUsuarios(users: any[]) { let resultado: any[] = []; return resultado; }",
+    semanticIntent: "code_refactor",
+    workspaceFiles: [
+      {
+        path: "src/governance/providers/userOverrideResolver.ts",
+        content: "export function resolveUserOverride() { return 'gemini'; }",
+      },
+      {
+        path: "src/services/promptSpecService.ts",
+        content: "export async function promptToSpec() { return true; }",
+      },
+    ],
+  });
+  const isolatedSelectedFiles = isolatedInlineContext.selectedFiles.map((file) => file.path);
+  if (isolatedSelectedFiles.length !== 1 || isolatedSelectedFiles[0] !== "inline_prompt_1.ts") {
+    failures.push(`inline_context_isolation_blocks_workspace_files: expected only inline_prompt_1.ts, received '${isolatedSelectedFiles.join(",")}'`);
+  }
+  if (isolatedSelectedFiles.includes("src/governance/providers/userOverrideResolver.ts")) {
+    failures.push("inline_context_isolation_blocks_workspace_files: workspace file leaked into selected files");
+  }
+  const noisySemanticContext = resolveCodeContext({
+    sourceRequest: "refatore esse codigo para melhorar a legibilidade\n\nfunction processarUsuarios(users: any[]) { if (users.length) { return users.map((user) => true); } return []; }",
+    semanticIntent: "code_refactor",
+    workspaceFiles: [
+      {
+        path: "src/services/promptSpecService.ts",
+        content: "export async function promptToSpec() { if (true) { return []; } return []; }",
+      },
+      {
+        path: "src/context/codeContextResolver.ts",
+        content: "export function resolveCodeContext(files: any[]) { return files.filter(Boolean).map(Boolean); }",
+      },
+      {
+        path: "promptSpecHistory.json",
+        content: "{\"items\":[{\"function\":\"return true\",\"length\":1}]}",
+      },
+      {
+        path: "mcp.json",
+        content: "{\"tools\":[\"promptSpecService\"],\"enabled\":true}",
+      },
+    ],
+  });
+  if (noisySemanticContext.semanticContext.matches.length !== 0) {
+    failures.push(`semantic_noise_reduction_must_suppress_runtime_matches_for_inline_simple_code: received '${noisySemanticContext.semanticContext.matches.map((match) => match.path).join(",")}'`);
+  }
+
+  const nestedAnalysis = analyzeAst([
+    {
+      path: "inline_prompt_1.ts",
+      content: "function test(a:any){ if(a){ if(a.x){ return true } } return false }",
+    },
+  ]);
+  if (!nestedAnalysis.smells.some((smell) => smell.type === "nested_conditions")) {
+    failures.push("ast_analysis_must_detect_nested_conditions: nested_conditions missing");
+  }
+  if (!nestedAnalysis.smells.some((smell) => smell.type === "uses_any")) {
+    failures.push("ast_analysis_must_detect_nested_any_usage: uses_any missing");
+  }
+  if (nestedAnalysis.metrics.max_nested_depth <= 1) {
+    failures.push("ast_analysis_must_calculate_nested_depth: max_nested_depth not greater than 1");
+  }
+  const highComplexityRouting = routeByAstComplexity({
+    metrics: {
+      ...nestedAnalysis.metrics,
+      cyclomatic_complexity: 10,
+      max_nested_depth: 4,
+      loop_count: 2,
+      conditional_count: 6,
+      any_usage_count: 6,
+      function_count: 6,
+    },
+    fileCount: 4,
+    tokenEstimate: 9000,
+    smellCount: 5,
+    availableBackends: ["gemini", "llama", "deterministic_builder"],
+  });
+  if (highComplexityRouting.level !== "high" || highComplexityRouting.selected_backend !== "gemini") {
+    failures.push(`complexity_routing_must_select_gemini_for_high_ast_complexity: received ${highComplexityRouting.level}/${highComplexityRouting.selected_backend}`);
+  }
+  for (const reason of ["cyclomatic_complexity", "nested_depth", "ast_smells"]) {
+    if (!highComplexityRouting.reasons.includes(reason)) {
+      failures.push(`complexity_routing_must_explain_high_complexity: missing '${reason}'`);
+    }
+  }
+  if (!highComplexityRouting.compact_output_required) {
+    failures.push("complexity_routing_must_require_compact_output_for_high_complexity: compact output not required");
+  }
+  const lowComplexityRouting = routeByAstComplexity({
+    metrics: plainSnippetContext.semanticAnalysis.metrics,
+    fileCount: plainSnippetContext.semanticAnalysis.files_analyzed,
+    tokenEstimate: plainSnippetContext.tokenEstimate,
+    smellCount: 0,
+    availableBackends: ["gemini", "llama", "deterministic_builder"],
+  });
+  if (lowComplexityRouting.level !== "low" || lowComplexityRouting.selected_backend !== "llama") {
+    failures.push(`complexity_routing_must_select_llama_for_low_ast_complexity: received ${lowComplexityRouting.level}/${lowComplexityRouting.selected_backend}`);
+  }
+  const intentPromotedRouting = promoteBackendForIntentContext({
+    semanticIntent: "code_refactor",
+    decision: lowComplexityRouting,
+    availableBackends: ["gemini", "llama", "deterministic_builder"],
+    hasAstAnalysis: true,
+    hasSemanticContext: false,
+    sessionContextHydrated: false,
+  });
+  if (intentPromotedRouting.selected_backend !== "gemini") {
+    failures.push(`intent_aware_backend_promotion_must_promote_code_refactor_with_ast_to_gemini: received ${intentPromotedRouting.selected_backend}`);
+  }
+  if (!intentPromotedRouting.reasons.includes("intent_aware_backend_promotion") || !intentPromotedRouting.reasons.includes("ast_analysis_context")) {
+    failures.push("intent_aware_backend_promotion_must_explain_ast_promotion: missing promotion reasons");
+  }
+  const sessionPromotedRouting = promoteBackendForIntentContext({
+    semanticIntent: "code_analysis",
+    decision: lowComplexityRouting,
+    availableBackends: ["gemini", "llama", "deterministic_builder"],
+    hasAstAnalysis: false,
+    hasSemanticContext: false,
+    sessionContextHydrated: true,
+  });
+  if (sessionPromotedRouting.selected_backend !== "gemini" || !sessionPromotedRouting.reasons.includes("session_context_hydrated")) {
+    failures.push("intent_aware_backend_promotion_must_promote_session_hydrated_code_analysis_to_gemini");
+  }
+  const architecturePromotedRouting = promoteBackendForIntentContext({
+    semanticIntent: "architecture_design",
+    decision: lowComplexityRouting,
+    availableBackends: ["gemini", "llama", "deterministic_builder"],
+    hasAstAnalysis: false,
+    hasSemanticContext: true,
+    sessionContextHydrated: false,
+  });
+  if (architecturePromotedRouting.selected_backend !== "gemini" || !architecturePromotedRouting.reasons.includes("semantic_context")) {
+    failures.push("intent_aware_backend_promotion_must_promote_architecture_with_semantic_context_to_gemini");
+  }
+  const orderedByComplexity = applyComplexityBackendSelection({
+    preferredBackend: "auto",
+    decision: highComplexityRouting,
+    candidates: [
+      { backend: { provider: "llama" } },
+      { backend: { provider: "deterministic_builder" }, deterministic: true },
+      { backend: { provider: "gemini" } },
+    ],
+  });
+  if (orderedByComplexity[0]?.backend.provider !== "gemini") {
+    failures.push("backend_selection_policy_must_prioritize_complexity_backend: gemini not first for high complexity");
+  }
+  const orderedByIntentPromotion = applyComplexityBackendSelection({
+    preferredBackend: "auto",
+    decision: intentPromotedRouting,
+    candidates: [
+      { backend: { provider: "llama" } },
+      { backend: { provider: "deterministic_builder" }, deterministic: true },
+      { backend: { provider: "gemini" } },
+    ],
+  });
+  if (orderedByIntentPromotion[0]?.backend.provider !== "gemini") {
+    failures.push("backend_selection_policy_must_prioritize_intent_promoted_gemini: gemini not first");
+  }
+
+  const astPrompt = compileSchemaAwarePrompt({
+    sourceRequest: "refatore esse codigo\nfunction processarUsuarios(users: any[]) { let resultado = []; return resultado; }",
+    semanticIntent: "code_refactor",
+    templateId: refactorTemplate.id,
+    inputFields: refactorTemplate.contract.input_fields,
+    outputFields: refactorTemplate.contract.output_fields as any,
+    strictJson: true,
+    codeContext: plainSnippetContext.codePack,
+    semanticAnalysisContext: plainSnippetContext.semanticAnalysisContext,
+  }).compiledPrompt;
+  for (const expected of ["AST_SEMANTIC_ANALYSIS", "detected_symbols", "code_metrics", "code_smells", "recommendation_signals"]) {
+    if (!astPrompt.includes(expected)) {
+      failures.push(`schema_aware_prompt_must_include_ast_semantic_analysis: missing '${expected}'`);
+    }
+  }
+  const compactPolicy = resolveCompactOutputPolicy({
+    semanticIntent: "code_analysis",
+    codeContext: plainSnippetContext.codePack,
+    semanticAnalysisContext: plainSnippetContext.semanticAnalysisContext,
+  });
+  if (!compactPolicy.enabled) {
+    failures.push("compact_output_prevents_truncated_json: compact output policy not enabled for code context");
+  }
+  const compactPrompt = compileSchemaAwarePrompt({
+    sourceRequest: "analise esse codigo\nfunction test(user: any[]) { if (user) { if (user.length) { return user; } } return []; }",
+    semanticIntent: "code_analysis",
+    templateId: analysisTemplate.id,
+    inputFields: analysisTemplate.contract.input_fields,
+    outputFields: analysisTemplate.contract.output_fields as any,
+    strictJson: true,
+    codeContext: plainSnippetContext.codePack,
+    semanticAnalysisContext: plainSnippetContext.semanticAnalysisContext,
+  }).compiledPrompt;
+  for (const expected of ["COMPACT_OUTPUT_MODE", "Return compact JSON only.", "Do not exceed the item limits.", "Return the complete JSON object."]) {
+    if (!compactPrompt.includes(expected)) {
+      failures.push(`compact_output_prevents_truncated_json: missing '${expected}'`);
+    }
   }
 
   const jsonInline = extractInlineCode('refatore esse json\n{"active_port":3000,"server_status":"running"}', "code_refactor");

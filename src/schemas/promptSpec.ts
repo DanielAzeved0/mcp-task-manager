@@ -162,6 +162,29 @@ export const promptClassificationDecisionSchema = z.object({
   decision_reason: z.string().optional(),
 }).optional();
 
+export const promptComplexityRoutingSchema = z.object({
+  score: z.number(),
+  level: z.string(),
+  selected_backend: z.string(),
+  compact_output_required: z.boolean().optional(),
+  reasons: z.array(z.string()),
+}).optional();
+
+export const promptSemanticContextSchema = z.object({
+  enabled: z.boolean(),
+  matches: z.array(z.object({
+    path: z.string(),
+    score: z.number(),
+    reason: z.string(),
+  })),
+}).optional();
+
+export const promptSessionContextSchema = z.object({
+  hydrated: z.boolean(),
+  source: z.string().optional(),
+  selected_context: z.array(z.string()),
+}).optional();
+
 export const promptFallbackSchema = z.object({
   used_fallback: z.boolean(),
   fallback_type: z.string(),
@@ -192,6 +215,9 @@ export const promptResponseSchema = z.object({
   provider_state: promptProviderStateSchema,
   model_failover_trace: promptModelFailoverTraceSchema,
   candidate_backends: z.array(z.string()).optional(),
+  complexity_routing: promptComplexityRoutingSchema,
+  semantic_context: promptSemanticContextSchema,
+  session_context: promptSessionContextSchema,
   fallback: promptFallbackSchema,
   cache: promptCacheSchema,
   versioning: promptVersioningSchema,

@@ -26,11 +26,19 @@ import { validateSpecSafety } from "../governance/safety/safetyEngine.js";
 import { enforceLearningBoundaries } from "../spec/learning/learningBoundaryEngine.js";
 import { buildJsonRetryInstruction, JsonStabilityError, parseStableJson } from "../ai/json/llmRetryController.js";
 import { compileSchemaAwarePrompt } from "../ai/prompt/schemaAwarePromptCompiler.js";
+import { resolveCompactOutputPolicy } from "../ai/prompt/compactOutputPolicy.js";
+import { applyComplexityBackendSelection } from "../ai/router/backendSelectionPolicy.js";
+import { routeByAstComplexity, type ComplexityRoutingDecision } from "../ai/router/complexityRouter.js";
+import { promoteBackendForIntentContext } from "../ai/router/intentAwareBackendPromotion.js";
 import { injectLlmContentIntoSpec } from "../spec/contracts/llmContentExtractor.js";
 import { assertSystemOwnedStructure, enforceSchemaAuthority, SchemaAuthorityError } from "../spec/contracts/schemaAuthorityGuard.js";
 import { shouldBlockHeuristicFieldInference, validateSemanticContent, validateStrictOutputTypes, SemanticGovernanceError } from "../spec/governance/semanticGovernance.js";
 import { guardInputFieldInference, type CandidateInputField } from "../spec/inputFieldInferenceGuard.js";
 import { resolveCodeContext } from "../context/codeContextResolver.js";
+import type { SemanticContextResult } from "../context/embeddingContextEngine.js";
+import { extractInlineCode } from "../context/inlineCodeExtractor.js";
+import { getRecentCodeMemory, rememberRecentInlineCode } from "../session/recentCodeMemory.js";
+import type { SessionContextHydration } from "../session/contextHydrator.js";
 import { addToHistory, getLearningPatterns } from "../learning/history/specHistoryStore.js";
 export { getLearningStats, updateSpecFeedback } from "../learning/history/specHistoryStore.js";
 
@@ -97,9 +105,12 @@ function buildExplicitInputCandidates(prompt: string): CandidateInputField[] {
 function improveWithLearning(baseSpec: PromptSpec, prompt: string, classification?: ClassificationResult): { improvedSpec: PromptSpec; improvements: string[] } {
   const improvements: string[] = [];
   let improvedSpec = { ...baseSpec };
+  const semanticIntent = classification?.semantic_intent ?? "general_spec";
+  const inferenceSource = extractInlineCode(prompt, semanticIntent);
+  const inferencePrompt = inferenceSource.hasInlineCode ? inferenceSource.naturalLanguagePrompt : prompt;
 
   // First: Try domain-aware enrichment
-  const domainMatch = detectDomain(prompt);
+  const domainMatch = detectDomain(inferencePrompt);
   if (domainMatch) {
     // Enrich output fields with domain template
     if (Object.keys(improvedSpec.output_fields).length < 2) {
@@ -110,7 +121,7 @@ function improveWithLearning(baseSpec: PromptSpec, prompt: string, classificatio
 
   // Apply high-quality input patterns from history
   const learningPatterns = getLearningPatterns();
-  const promptWords = prompt.toLowerCase().split(/\s+/);
+  const promptWords = inferencePrompt.toLowerCase().split(/\s+/);
   const relevantKeywords = promptWords.filter(word => learningPatterns.domain_keywords[word]);
   const candidateInputFields: CandidateInputField[] = [];
 
@@ -133,12 +144,12 @@ function improveWithLearning(baseSpec: PromptSpec, prompt: string, classificatio
       }
     });
   });
-  candidateInputFields.push(...buildExplicitInputCandidates(prompt));
+  candidateInputFields.push(...buildExplicitInputCandidates(inferencePrompt));
 
   if (candidateInputFields.length > 0) {
     const guarded = guardInputFieldInference({
-      sourceRequest: prompt,
-      semanticIntent: classification?.semantic_intent ?? "general_spec",
+      sourceRequest: inferencePrompt,
+      semanticIntent,
       domain: classification?.classification_decision?.domain ?? "unknown",
       task: classification?.classification_decision?.task ?? "unknown",
       templateInputFields: baseSpec.input_fields,
@@ -1189,7 +1200,15 @@ type ProviderRuntimeInfo = {
   model_failover_trace: ModelFailoverEvent[];
   candidate_backends: string[];
   classification_decision?: ClassificationResult["classification_decision"];
+  complexity_routing?: ComplexityRoutingDecision;
+  semantic_context?: SemanticContextResult;
+  session_context?: SessionContextHydration;
 };
+
+export interface PromptToSpecOptions {
+  sessionId?: string;
+  sessionContext?: SessionContextHydration;
+}
 
 function createLlamaCandidate(classification: ClassificationResult, fallbackUsed: boolean): BackendCandidate | null {
   if (!ollamaClient) return null;
@@ -1297,7 +1316,7 @@ function selectBackend(preferredBackend: string = "auto", prompt: string = ""): 
   return { candidates, classification, policy };
 }
 
-export async function promptToSpec(prompt: string, context?: string, preferredBackend: string = "auto", strictJson: boolean = false): Promise<CompletionResult & { spec: NormalizedSpec; ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean }; confidence: ConfidenceReport; quality_breakdown: QualityBreakdown; classification_trace?: ClassificationResult["classification_trace"]; fallback_info: FallbackInfo } & ProviderRuntimeInfo> {
+export async function promptToSpec(prompt: string, context?: string, preferredBackend: string = "auto", strictJson: boolean = false, options: PromptToSpecOptions = {}): Promise<CompletionResult & { spec: NormalizedSpec; ai_backend: AiBackend; json_validation: { is_valid: boolean; attempts: number; auto_fixed: boolean }; confidence: ConfidenceReport; quality_breakdown: QualityBreakdown; classification_trace?: ClassificationResult["classification_trace"]; fallback_info: FallbackInfo } & ProviderRuntimeInfo> {
   const generateContextAwareFallback = (): PromptSpec => {
     const normalizedPrompt = prompt.trim().replace(/\s+/g, " ");
     const lowerPrompt = normalizedPrompt.toLowerCase();
@@ -1391,7 +1410,14 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
 
   const trace = createTraceContext();
   const cachePrompt = context?.trim() ? `${prompt.trim()}\n\n${context.trim()}` : prompt.trim();
-  const semanticHit = semanticSpecCache.get(cachePrompt);
+  const skipSemanticCacheRead = options.sessionContext?.hydrated === true;
+  if (skipSemanticCacheRead) {
+    logEvent("info", "semantic_cache_read_skipped", {
+      reason: "session_context_hydrated",
+      selected_context: options.sessionContext?.selected_context ?? [],
+    }, trace);
+  }
+  const semanticHit = skipSemanticCacheRead ? undefined : semanticSpecCache.get(cachePrompt);
   if (semanticHit) {
     logEvent("info", "semantic_cache_hit", {
       similarity: Number(semanticHit.similarity.toFixed(2)),
@@ -1428,11 +1454,22 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
       model_failover_trace: [],
       candidate_backends: ["semantic_cache"],
       classification_decision: undefined,
+      complexity_routing: undefined,
+      semantic_context: undefined,
+      session_context: options.sessionContext,
     };
   }
 
-  const { candidates, classification, policy } = selectBackend(preferredBackend, prompt);
-  const candidateBackends = candidates.map((candidate) => candidate.backend.provider);
+  let { candidates, classification, policy } = selectBackend(preferredBackend, prompt);
+  if (options.sessionId) {
+    rememberRecentInlineCode({
+      sessionId: options.sessionId,
+      sourceRequest: prompt,
+      semanticIntent: classification.semantic_intent,
+      trace,
+    });
+  }
+  let candidateBackends = candidates.map((candidate) => candidate.backend.provider);
   const modelFailoverTrace: ModelFailoverEvent[] = [];
   incrementMetric("routing_requests");
   logEvent("info", "prompt_classified", {
@@ -1517,16 +1554,83 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
     }, trace);
   }
 
-  const shouldInjectCodeContext = ["code_refactor", "code_analysis", "api_design"].includes(classification.semantic_intent);
+  const shouldInjectCodeContext = ["code_refactor", "code_analysis", "api_design", "architecture_design"].includes(classification.semantic_intent);
   const codeContext = shouldInjectCodeContext
     ? resolveCodeContext({
         sourceRequest: prompt,
         semanticIntent: classification.semantic_intent,
         workspaceRoot: process.cwd(),
+        additionalFiles: options.sessionId ? getRecentCodeMemory(options.sessionId)?.files : undefined,
         maxCodePackTokens: 12000,
         trace,
       })
-    : { selectedFiles: [], dependencyMap: {}, codePack: "", tokenEstimate: 0 };
+    : {
+        selectedFiles: [],
+        dependencyMap: {},
+        codePack: "",
+        tokenEstimate: 0,
+        semanticAnalysisContext: "",
+        semanticContext: { enabled: true, matches: [] },
+        semanticAnalysis: {
+          files_analyzed: 0,
+          symbols: { functions: [], classes: [], interfaces: [], imports: [], exports: [] },
+          metrics: {
+            line_count: 0,
+            function_count: 0,
+            class_count: 0,
+            interface_count: 0,
+            import_count: 0,
+            export_count: 0,
+            cyclomatic_complexity: 0,
+            max_nested_depth: 0,
+            loop_count: 0,
+            conditional_count: 0,
+            any_usage_count: 0,
+          },
+          smells: [],
+          recommendation_signals: [],
+        },
+      };
+  const complexityRouting = shouldInjectCodeContext
+    ? promoteBackendForIntentContext({
+        semanticIntent: classification.semantic_intent,
+        decision: routeByAstComplexity({
+          metrics: codeContext.semanticAnalysis.metrics,
+          fileCount: codeContext.semanticAnalysis.files_analyzed,
+          tokenEstimate: codeContext.tokenEstimate,
+          smellCount: codeContext.semanticAnalysis.smells.length,
+          availableBackends: candidateBackends,
+          trace,
+        }),
+        availableBackends: candidateBackends,
+        hasAstAnalysis: codeContext.semanticAnalysis.files_analyzed > 0,
+        hasSemanticContext: codeContext.semanticContext.matches.length > 0,
+        sessionContextHydrated: options.sessionContext?.hydrated === true,
+        trace,
+      })
+    : undefined;
+  if (complexityRouting) {
+    candidates = applyComplexityBackendSelection({
+      candidates,
+      decision: complexityRouting,
+      preferredBackend,
+    });
+    candidateBackends = candidates.map((candidate) => candidate.backend.provider);
+    logEvent("info", "backend_selected_by_complexity", {
+      selected_backend: candidates[0]?.backend.provider ?? "local_fallback",
+      candidate_backends: candidateBackends,
+      complexity_routing: complexityRouting,
+    }, trace);
+  }
+  const compactOutputPolicy = resolveCompactOutputPolicy({
+    semanticIntent: classification.semantic_intent,
+    codeContext: codeContext.codePack,
+    semanticAnalysisContext: codeContext.semanticAnalysisContext,
+    estimatedPromptLength: prompt.length + (context?.length ?? 0) + codeContext.codePack.length + codeContext.semanticAnalysisContext.length,
+    force: complexityRouting?.compact_output_required,
+    forceReason: "high_ast_complexity",
+    trace,
+  });
 
   let lastError = "";
   let rawAiResponse = "";
@@ -1566,6 +1670,8 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
             strictJson: true,
             context,
             codeContext: codeContext.codePack,
+            semanticAnalysisContext: codeContext.semanticAnalysisContext,
+            compactOutputPolicy,
             previousErrors: [lastError].filter(Boolean),
             attempt,
             trace,
@@ -1667,11 +1773,18 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
           });
 
           const normalizedSpec = normalizeSpec(finalSpec);
-          if (shouldWriteSemanticCache({ provider: backend.provider, fallbackUsed: backend.fallback_used, semanticPrecisionScore: confidence.semantic_alignment, intentMatchScore: confidence.template_alignment })) {
+          const canWriteSemanticCache = !options.sessionContext?.hydrated && shouldWriteSemanticCache({
+            provider: backend.provider,
+            fallbackUsed: backend.fallback_used,
+            semanticPrecisionScore: confidence.semantic_alignment,
+            intentMatchScore: confidence.template_alignment,
+          });
+          if (canWriteSemanticCache) {
             semanticSpecCache.set(cachePrompt, cachePrompt, normalizedSpec);
           } else {
             incrementMetric("semantic_cache_poison_prevention_count");
             logEvent("info", "semantic_cache_write_skipped", {
+              reason: options.sessionContext?.hydrated ? "session_context_hydrated" : "cache_policy",
               provider: backend.provider,
               fallback_used: backend.fallback_used,
               semantic_alignment: confidence.semantic_alignment,
@@ -1714,6 +1827,9 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
             model_failover_trace: modelFailoverTrace,
             candidate_backends: candidateBackends,
             classification_decision: classification.classification_decision,
+            complexity_routing: complexityRouting,
+            semantic_context: codeContext.semanticContext,
+            session_context: options.sessionContext,
           };
         }
 
@@ -1927,6 +2043,9 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
       model_failover_trace: modelFailoverTrace,
       candidate_backends: candidateBackends,
       classification_decision: classification.classification_decision,
+      complexity_routing: complexityRouting,
+      semantic_context: codeContext.semanticContext,
+      session_context: options.sessionContext,
     };
   }
 
@@ -1960,6 +2079,9 @@ export async function promptToSpec(prompt: string, context?: string, preferredBa
     model_failover_trace: modelFailoverTrace,
     candidate_backends: candidateBackends,
     classification_decision: classification.classification_decision,
+    complexity_routing: complexityRouting,
+    semantic_context: codeContext.semanticContext,
+    session_context: options.sessionContext,
   };
 }
 
