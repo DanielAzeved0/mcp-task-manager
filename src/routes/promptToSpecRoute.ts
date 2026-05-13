@@ -8,6 +8,8 @@ import { classifyPromptDetailed } from "../ai/router/semanticClassifier.js";
 import { SemanticGovernanceError, validateContextualInputs } from "../spec/governance/semanticGovernance.js";
 import { hydrateInlineCodeBeforeRuntimeGate } from "../spec/governance/runtimeInputHydration.js";
 import { buildPromptSpecResponse } from "../spec/response/promptSpecResponseBuilder.js";
+import { hydrateSessionContext } from "../session/contextHydrator.js";
+import { rememberRecentInlineCode } from "../session/recentCodeMemory.js";
 
 const cache = new Map<string, any>();
 const history = new Map<string, Array<{ quality_score: number; feedback_score: number | null; timestamp: number }>>();
@@ -47,6 +49,7 @@ export function registerPromptToSpecRoute(app: Express) {
       const requestId = randomUUID();
       const requestTimestamp = new Date().toISOString();
       const cacheKey = getCacheKey(prompt, context, user_id, team_id);
+      const sessionId = `${user_id}::${team_id ?? "anonymous"}`;
       const isBackendHealthProbe = user_id === "health_check" && prompt.trim().toLowerCase() === "backend health check";
       if (isBackendHealthProbe) {
         res.status(200).json(promptResponseSchema.parse({
@@ -128,10 +131,21 @@ export function registerPromptToSpecRoute(app: Express) {
       }
   
       const preflightClassification = classifyPromptDetailed(prompt);
+      rememberRecentInlineCode({
+        sessionId,
+        sourceRequest: prompt,
+        semanticIntent: preflightClassification.semantic_intent,
+      });
       const hydratedInputs = hydrateInlineCodeBeforeRuntimeGate({
         sourceRequest: prompt,
         semanticIntent: preflightClassification.semantic_intent,
         inputs,
+      });
+      const sessionHydration = hydrateSessionContext({
+        sessionId,
+        sourceRequest: prompt,
+        semanticIntent: preflightClassification.semantic_intent,
+        inputs: hydratedInputs.inputs,
       });
       logEvent("info", "state_machine_transition", {
         from: "classification_layer",
@@ -139,7 +153,7 @@ export function registerPromptToSpecRoute(app: Express) {
         intent: preflightClassification.semantic_intent,
       });
       try {
-        validateContextualInputs(preflightClassification.semantic_intent, hydratedInputs.inputs);
+        validateContextualInputs(preflightClassification.semantic_intent, sessionHydration.inputs);
       } catch (error) {
         if (error instanceof SemanticGovernanceError) {
           incrementMetric("runtime_blocks_total");
@@ -275,7 +289,10 @@ export function registerPromptToSpecRoute(app: Express) {
   
       const startTime = Date.now();
       const effectiveStrictJson = true;
-      const initialResult = await promptToSpec(prompt, context, preferred_backend, effectiveStrictJson);
+      const initialResult = await promptToSpec(prompt, context, preferred_backend, effectiveStrictJson, {
+        sessionId,
+        sessionContext: sessionHydration.sessionContext,
+      });
       let totalTokens = initialResult.tokens;
       let modelUsed = initialResult.model;
       let currentSpec = initialResult.spec;
@@ -289,6 +306,9 @@ export function registerPromptToSpecRoute(app: Express) {
       let currentModelFailoverTrace = initialResult.model_failover_trace;
       let currentCandidateBackends = initialResult.candidate_backends;
       let currentClassificationDecision = initialResult.classification_decision;
+      let currentComplexityRouting = initialResult.complexity_routing;
+      let currentSemanticContext = initialResult.semantic_context;
+      let currentSessionContext = initialResult.session_context;
   
       let validationResult = validateSpec(currentSpec);
       let iterations = 1;
@@ -317,6 +337,9 @@ export function registerPromptToSpecRoute(app: Express) {
         currentModelFailoverTrace = initialResult.model_failover_trace;
         currentCandidateBackends = initialResult.candidate_backends;
         currentClassificationDecision = initialResult.classification_decision;
+        currentComplexityRouting = initialResult.complexity_routing;
+        currentSemanticContext = initialResult.semantic_context;
+        currentSessionContext = initialResult.session_context;
         iterations += 1;
         qualityScore = calculateQuality(validationResult.valid, iterations);
       }
@@ -371,6 +394,9 @@ export function registerPromptToSpecRoute(app: Express) {
         provider_state: currentProviderState,
         model_failover_trace: currentModelFailoverTrace,
         candidate_backends: currentCandidateBackends,
+        complexity_routing: currentComplexityRouting,
+        semantic_context: currentSemanticContext,
+        session_context: currentSessionContext,
         fallback: {
           used_fallback: currentAiBackend.fallback_used,
           fallback_type: currentFallbackInfo?.fallback_type ?? (currentAiBackend.fallback_used ? "generic" : "none"),

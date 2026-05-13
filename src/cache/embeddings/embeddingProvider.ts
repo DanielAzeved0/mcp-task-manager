@@ -6,6 +6,22 @@ export interface EmbeddingProvider {
 }
 
 const VECTOR_SIZE = 64;
+const SEMANTIC_CODE_STOPWORDS = new Set([
+  "function",
+  "return",
+  "if",
+  "for",
+  "true",
+  "false",
+  "const",
+  "let",
+  "var",
+  "any",
+  "length",
+  "push",
+  "map",
+  "filter",
+]);
 
 function hashToken(token: string): number {
   let hash = 2166136261;
@@ -54,7 +70,8 @@ function tokenize(text: string): string[] {
   const words = normalized
     .split(/\s+/)
     .filter((token) => token.length > 1)
-    .map((token) => synonyms[token] ?? token);
+    .map((token) => Object.prototype.hasOwnProperty.call(synonyms, token) ? synonyms[token] : token)
+    .filter((token) => !SEMANTIC_CODE_STOPWORDS.has(token));
   const bigrams = words.slice(0, -1).map((word, index) => `${word}_${words[index + 1]}`);
   return [...words, ...bigrams];
 }

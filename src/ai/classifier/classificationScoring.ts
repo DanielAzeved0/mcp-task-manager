@@ -21,6 +21,11 @@ export interface ClassificationTrace {
   domain?: string;
   task?: string;
   decision_reason?: string;
+  intent_typo_normalization?: {
+    normalization_applied: boolean;
+    normalized_terms: string[];
+    normalized_prompt?: string;
+  };
 }
 
 function normalizePrompt(prompt: string): string {

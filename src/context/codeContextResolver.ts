@@ -1,16 +1,20 @@
 import fs from "fs";
 import path from "path";
+import { analyzeAst, buildSemanticAnalysisContext, type AstSemanticAnalysis } from "../analysis/astAnalyzer.js";
 import { logEvent, type TraceContext } from "../observability/logger.js";
 import { buildCodePack } from "./codePackBuilder.js";
 import { mergeCodeContextFiles } from "./codeContextMerger.js";
 import { scanDependencies, type DependencyMap, type WorkspaceFile } from "./dependencyScanner.js";
+import { resolveSemanticContext, type SemanticContextResult } from "./embeddingContextEngine.js";
 import { extractInlineCode } from "./inlineCodeExtractor.js";
+import { applyInlineContextIsolation } from "./inlineContextIsolationPolicy.js";
 
 export interface CodeContextResolverInput {
   sourceRequest: string;
   semanticIntent: string;
   workspaceRoot?: string;
   workspaceFiles?: WorkspaceFile[];
+  additionalFiles?: WorkspaceFile[];
   maxSelectedFiles?: number;
   maxCodePackTokens?: number;
   trace?: TraceContext;
@@ -31,6 +35,9 @@ export interface CodeContextResult {
     inlineFiles: string[];
     languages: string[];
   };
+  semanticAnalysis: AstSemanticAnalysis;
+  semanticAnalysisContext: string;
+  semanticContext: SemanticContextResult;
 }
 
 const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".json"]);
@@ -134,8 +141,16 @@ export function resolveCodeContext(input: CodeContextResolverInput): CodeContext
 
   const inlineExtraction = extractInlineCode(input.sourceRequest, input.semanticIntent, input.trace);
   const realWorkspaceFiles = input.workspaceFiles ?? listWorkspaceFiles(input.workspaceRoot ?? process.cwd());
-  const workspaceFiles = mergeCodeContextFiles(inlineExtraction.inlineFiles, realWorkspaceFiles);
+  const additionalFiles = input.additionalFiles ?? [];
+  const workspaceFiles = mergeCodeContextFiles(inlineExtraction.inlineFiles, [...additionalFiles, ...realWorkspaceFiles]);
   const dependencyMap = scanDependencies(workspaceFiles);
+  const semanticContext = resolveSemanticContext({
+    sourceRequest: input.sourceRequest,
+    semanticIntent: input.semanticIntent,
+    files: realWorkspaceFiles,
+    trace: input.trace,
+  });
+  const semanticMatchesByPath = new Map(semanticContext.matches.map((match) => [match.path, match]));
   logEvent("info", "dependency_scan_completed", {
     file_count: workspaceFiles.length,
     dependency_entries: Object.keys(dependencyMap).length,
@@ -144,13 +159,27 @@ export function resolveCodeContext(input: CodeContextResolverInput): CodeContext
   const terms = requestTerms(input.sourceRequest);
   const initiallyScored = workspaceFiles.map((file) => {
     const scored = scoreFile(file, terms, input.semanticIntent);
-    return { ...file, relevanceScore: scored.score, reasons: scored.reasons };
+    const semanticMatch = semanticMatchesByPath.get(file.path);
+    const semanticScore = semanticMatch ? Math.max(scored.score, semanticMatch.score) : scored.score;
+    return {
+      ...file,
+      relevanceScore: semanticScore,
+      reasons: semanticMatch ? [...scored.reasons, semanticMatch.reason] : scored.reasons,
+    };
   });
   const dependencyAdjusted = addDependencyScores(initiallyScored, dependencyMap);
-  const selectedFiles = dependencyAdjusted
+  let selectedFiles = dependencyAdjusted
     .filter((file) => file.relevanceScore >= MIN_RELEVANCE)
     .sort((a, b) => b.relevanceScore - a.relevanceScore)
     .slice(0, input.maxSelectedFiles ?? DEFAULT_MAX_FILES);
+
+  const isolation = applyInlineContextIsolation({
+    sourceRequest: input.sourceRequest,
+    inlineFiles: inlineExtraction.inlineFiles.map((file) => file.virtualPath),
+    selectedFiles,
+    trace: input.trace,
+  });
+  selectedFiles = isolation.selectedFiles;
 
   for (const file of selectedFiles) {
     logEvent("info", "code_context_file_selected", {
@@ -161,6 +190,15 @@ export function resolveCodeContext(input: CodeContextResolverInput): CodeContext
   }
 
   const pack = buildCodePack(selectedFiles, input.maxCodePackTokens ?? 12000, input.trace);
+  const semanticAnalysis = analyzeAst(selectedFiles, input.trace);
+  const semanticAnalysisContext = buildSemanticAnalysisContext(semanticAnalysis);
+  if (semanticAnalysisContext) {
+    logEvent("info", "semantic_analysis_context_injected", {
+      files_analyzed: semanticAnalysis.files_analyzed,
+      smell_count: semanticAnalysis.smells.length,
+      recommendation_signals: semanticAnalysis.recommendation_signals,
+    }, input.trace);
+  }
   logEvent("info", "code_context_injected", {
     selected_files: selectedFiles.map((file) => file.path),
     token_estimate: pack.tokenEstimate,
@@ -176,6 +214,9 @@ export function resolveCodeContext(input: CodeContextResolverInput): CodeContext
       inlineFiles: inlineExtraction.inlineFiles.map((file) => file.virtualPath),
       languages: [...new Set(inlineExtraction.inlineFiles.map((file) => file.language))],
     },
+    semanticAnalysis,
+    semanticAnalysisContext,
+    semanticContext,
   };
 }
 
