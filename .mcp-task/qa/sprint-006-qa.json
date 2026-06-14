@@ -1,0 +1,32 @@
+{
+  "sprintId": "SPRINT-006",
+  "contractPath": ".mcp-task/contracts/sprint-006-qa-evaluation-engine.md",
+  "status": "passed",
+  "validatedAt": "2026-06-13T15:55:00.000Z",
+  "items": [
+    {
+      "id": "qa-001",
+      "label": "QA result references a Contract inside .mcp-task/contracts/.",
+      "status": "passed",
+      "evidence": ".mcp-task/contracts/sprint-006-qa-evaluation-engine.md"
+    },
+    {
+      "id": "qa-002",
+      "label": "Evaluation cannot pass when QA failed.",
+      "status": "passed",
+      "evidence": "Golden validation covers QA failed blocking Evaluation pass."
+    },
+    {
+      "id": "qa-003",
+      "label": "Evaluation cannot pass below score 90.",
+      "status": "passed",
+      "evidence": "Golden validation covers score threshold."
+    },
+    {
+      "id": "qa-004",
+      "label": "IDE shell displays QA checklist and Done gate status.",
+      "status": "passed",
+      "evidence": "public/app.js renders QA checklist and Evaluation gate."
+    }
+  ]
+}

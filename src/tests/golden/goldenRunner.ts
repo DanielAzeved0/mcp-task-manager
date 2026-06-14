@@ -1,4 +1,5 @@
 import { buildSpecFromPlan } from "../../spec/builder/specBuilder.js";
+import { readFileSync } from "node:fs";
 import { createDeterministicPlan } from "../../spec/planner/planDocument.js";
 import { selectTemplate } from "../../spec/templates/registry.js";
 import { classifyPromptDetailed } from "../../ai/router/semanticClassifier.js";
@@ -22,6 +23,55 @@ import { guardInputFieldInference } from "../../spec/inputFieldInferenceGuard.js
 import { resolveCodeContext } from "../../context/codeContextResolver.js";
 import { extractInlineCode } from "../../context/inlineCodeExtractor.js";
 import { getProviderHealth, recordProviderFailure } from "../../governance/providers/providerGovernance.js";
+import {
+  classifyArtifact,
+  normalizeArtifactPath,
+  parseSprintSummary,
+  parseTerminalEvents,
+  validateActivityEvent,
+  validateAgentState,
+  validateArtifactContent,
+  validateContractContent,
+  validateEvaluationDocument,
+  validateQaResult,
+  validateSprintProgressState,
+  validateSprintSpecReference,
+  validateWritableArtifactPath,
+  WorkspaceArtifactError,
+} from "../../infra/file-system/workspaceArtifacts.js";
+import {
+  approveCommandProposal,
+  classifyCommandRisk,
+  createPackageScriptProposals,
+  recordCommandExecutionResult,
+  summarizeToolExecution,
+  validateCommandExecutionResult,
+  validateCommandProposal,
+  validateMcpToolCall,
+  validateMcpToolResult,
+} from "../../infra/mcp/toolExecutionHarness.js";
+import {
+  findRelatedSprintArtifacts,
+  validateDecisionNoteInput,
+  validateMemoryDocument,
+  validateMemorySearchQuery,
+  LocalMemoryError,
+} from "../../infra/file-system/localMemory.js";
+import {
+  CliError,
+  formatCliStatus,
+  formatDoctorChecks,
+  parseCliCommand,
+  validateEssentialScripts,
+  validatePackageMetadata,
+} from "../../cli/cliCore.js";
+import {
+  MvpReadinessError,
+  assertRequiredReadmeSections,
+  calculateReadinessScore,
+  deriveReadinessStatus,
+  validateMvpReadinessReport,
+} from "../../core/mvp/readiness.js";
 
 const GOLDEN_CASES = [
   {
@@ -606,6 +656,761 @@ export function runGoldenSuite(): { passed: boolean; failures: string[] } {
     if (!(error instanceof SemanticGovernanceError) || error.errorCode !== "strict_output_violation") {
       failures.push("strict_output_validation_should_reject_string_for_array: wrong error type");
     }
+  }
+
+  const normalizedArtifactPath = normalizeArtifactPath(".mcp-task\\sprints\\roadmap.md");
+  if (normalizedArtifactPath !== ".mcp-task/sprints/roadmap.md") {
+    failures.push("workspace_path_normalization_should_use_posix_paths: path was not normalized");
+  }
+
+  for (const unsafePath of ["../AGENTS.md", ".mcp-task/../AGENTS.md", "C:/tmp/secret.md", "/tmp/secret.md"]) {
+    try {
+      normalizeArtifactPath(unsafePath);
+      failures.push(`workspace_path_guard_should_reject_${unsafePath}: unsafe path accepted`);
+    } catch (error) {
+      if (!(error instanceof WorkspaceArtifactError) || error.code !== "invalid_artifact_path") {
+        failures.push(`workspace_path_guard_should_classify_${unsafePath}: wrong error type`);
+      }
+    }
+  }
+
+  try {
+    normalizeArtifactPath(".mcp-task/sprints/archive.exe");
+    failures.push("workspace_path_guard_should_reject_unsupported_extension: exe accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "unsupported_artifact_type") {
+      failures.push("workspace_path_guard_should_classify_unsupported_extension: wrong error type");
+    }
+  }
+
+  if (classifyArtifact(".mcp-task/sprints/roadmap.md") !== "roadmap") {
+    failures.push("workspace_artifact_classifier_should_detect_roadmap: roadmap not detected");
+  }
+
+  if (classifyArtifact(".mcp-task/contracts/sprint-002-file-backed-runtime.md") !== "contract") {
+    failures.push("workspace_artifact_classifier_should_detect_contract: contract not detected");
+  }
+
+  if (classifyArtifact(".mcp-task/agents/agents.json") !== "agent") {
+    failures.push("workspace_artifact_classifier_should_detect_agent_state: agent state not detected");
+  }
+
+  if (classifyArtifact(".mcp-task/progress/sprint-005.json") !== "progress") {
+    failures.push("workspace_artifact_classifier_should_detect_progress_state: progress state not detected");
+  }
+
+  if (classifyArtifact(".mcp-task/qa/sprint-006-qa.json") !== "qa") {
+    failures.push("workspace_artifact_classifier_should_detect_qa_result: qa result not detected");
+  }
+
+  if (validateWritableArtifactPath(".mcp-task/specs/sprint-003-spec-authoring.md") !== "spec") {
+    failures.push("workspace_write_guard_should_allow_spec_markdown: spec path rejected");
+  }
+
+  if (validateWritableArtifactPath(".mcp-task/sprints/sprint-003-spec-sprint-authoring.md") !== "sprint") {
+    failures.push("workspace_write_guard_should_allow_sprint_markdown: sprint path rejected");
+  }
+
+  if (validateWritableArtifactPath(".mcp-task/contracts/sprint-004-contract-gatekeeping.md") !== "contract") {
+    failures.push("workspace_write_guard_should_allow_contract_markdown: contract path rejected");
+  }
+
+  for (const forbiddenWritePath of [
+    ".mcp-task/evaluations/sprint-003-evaluation.json",
+    ".mcp-task/logs/sprint-003.md",
+    ".mcp-task/memory/project.json",
+    ".mcp-task/sprints/roadmap.md",
+  ]) {
+    try {
+      validateWritableArtifactPath(forbiddenWritePath);
+      failures.push(`workspace_write_guard_should_reject_${forbiddenWritePath}: forbidden write path accepted`);
+    } catch (error) {
+      if (!(error instanceof WorkspaceArtifactError) || error.code !== "invalid_artifact_path") {
+        failures.push(`workspace_write_guard_should_classify_${forbiddenWritePath}: wrong error type`);
+      }
+    }
+  }
+
+  const validContract = [
+    "# Contract - SPRINT-004 Contract Builder and Gatekeeping",
+    "## sprint_id",
+    "`SPRINT-004`",
+    "## objective",
+    "Create a Contract gate.",
+    "## allowed_changes",
+    "- Add Contract validation.",
+    "## forbidden_changes",
+    "- Do not execute Build.",
+    "## acceptance_criteria",
+    "- Build is blocked without Contract.",
+    "## qa_checklist",
+    "- [ ] Validate gate.",
+    "## expected_outputs",
+    "- Contract gate summary.",
+    "## rollback_notes",
+    "Remove Contract gate.",
+  ].join("\n\n");
+  const validContractResult = validateContractContent(validContract, "SPRINT-004");
+  if (!validContractResult.valid || validContractResult.missingFields.length > 0) {
+    failures.push("contract_gate_validator_should_accept_complete_contract: valid Contract rejected");
+  }
+
+  const invalidContractResult = validateContractContent("# Contract\n\n## sprint_id\n\n`SPRINT-004`", "SPRINT-004");
+  for (const missingField of ["objective", "allowed_changes", "forbidden_changes", "acceptance_criteria", "qa_checklist", "expected_outputs", "rollback_notes"]) {
+    if (!invalidContractResult.missingFields.includes(missingField)) {
+      failures.push(`contract_gate_validator_should_report_missing_${missingField}: field not reported`);
+    }
+  }
+
+  const validAgent = validateAgentState({
+    name: "Builder",
+    role: "Builder",
+    goal: "Implement Contract scope.",
+    allowed_actions: ["edit_allowed_files"],
+    forbidden_actions: ["self_validate_completion"],
+    inputs: ["contract"],
+    outputs: ["implementation"],
+    status: "active",
+  });
+  if (validAgent.role !== "Builder" || validAgent.status !== "active") {
+    failures.push("agent_state_validator_should_accept_valid_builder: valid Builder rejected");
+  }
+
+  try {
+    validateAgentState({ name: "Runner", role: "Runner", goal: "Run", allowed_actions: [], forbidden_actions: [], inputs: [], outputs: [], status: "active" });
+    failures.push("agent_state_validator_should_reject_invalid_role: invalid role accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "invalid_agent_state") {
+      failures.push("agent_state_validator_should_classify_invalid_role: wrong error type");
+    }
+  }
+
+  const validEvent = validateActivityEvent({
+    id: "evt-1",
+    sprintId: "SPRINT-005",
+    agent: "Builder",
+    type: "progressed",
+    message: "Updated local progress.",
+    timestamp: "2026-06-13T14:45:00.000Z",
+    artifactPath: ".mcp-task/progress/sprint-005.json",
+  });
+  if (validEvent.artifactPath !== ".mcp-task/progress/sprint-005.json") {
+    failures.push("activity_event_validator_should_accept_safe_artifact_path: safe artifact rejected");
+  }
+
+  try {
+    validateActivityEvent({
+      id: "evt-unsafe",
+      sprintId: "SPRINT-005",
+      agent: "Builder",
+      type: "progressed",
+      message: "Bad path.",
+      timestamp: "2026-06-13T14:45:00.000Z",
+      artifactPath: "../secret.md",
+    });
+    failures.push("activity_event_validator_should_reject_unsafe_artifact_path: unsafe path accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "invalid_artifact_path") {
+      failures.push("activity_event_validator_should_classify_unsafe_artifact_path: wrong error type");
+    }
+  }
+
+  try {
+    validateActivityEvent({
+      id: "evt-bad-time",
+      sprintId: "SPRINT-005",
+      agent: "Builder",
+      type: "progressed",
+      message: "Bad timestamp.",
+      timestamp: "not-a-date",
+    });
+    failures.push("activity_event_validator_should_reject_invalid_timestamp: invalid timestamp accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "invalid_event") {
+      failures.push("activity_event_validator_should_classify_invalid_timestamp: wrong error type");
+    }
+  }
+
+  const progress = validateSprintProgressState({
+    sprintId: "SPRINT-005",
+    stage: "Build",
+    status: "building",
+    updatedAt: "2026-06-13T14:45:00.000Z",
+    agents: [validAgent],
+    events: [validEvent],
+  });
+  if (progress.events.length !== 1 || progress.agents.length !== 1) {
+    failures.push("progress_state_validator_should_accept_agents_and_events: progress mismatch");
+  }
+
+  try {
+    validateSprintProgressState({
+      sprintId: "SPRINT-005",
+      stage: "Deploy",
+      status: "building",
+      updatedAt: "2026-06-13T14:45:00.000Z",
+      agents: [],
+      events: [],
+    });
+    failures.push("progress_state_validator_should_reject_invalid_stage: invalid stage accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "invalid_progress_state") {
+      failures.push("progress_state_validator_should_classify_invalid_stage: wrong error type");
+    }
+  }
+
+  const validQaResult = validateQaResult({
+    sprintId: "SPRINT-006",
+    contractPath: ".mcp-task/contracts/sprint-006-qa-evaluation-engine.md",
+    status: "passed",
+    validatedAt: "2026-06-13T15:55:00.000Z",
+    items: [
+      { id: "qa-001", label: "Contract path is safe.", status: "passed" },
+      { id: "qa-002", label: "Score gate is enforced.", status: "passed" },
+    ],
+  });
+  if (validQaResult.status !== "passed" || validQaResult.items.length !== 2) {
+    failures.push("qa_result_validator_should_accept_complete_passed_result: valid QA rejected");
+  }
+
+  try {
+    validateQaResult({
+      sprintId: "SPRINT-006",
+      contractPath: "../contracts/outside.md",
+      status: "passed",
+      validatedAt: "2026-06-13T15:55:00.000Z",
+      items: [{ id: "qa-001", label: "Bad path.", status: "passed" }],
+    });
+    failures.push("qa_result_validator_should_reject_unsafe_contract_path: unsafe path accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "invalid_artifact_path") {
+      failures.push("qa_result_validator_should_classify_unsafe_contract_path: wrong error type");
+    }
+  }
+
+  try {
+    validateQaResult({
+      sprintId: "SPRINT-006",
+      contractPath: ".mcp-task/contracts/sprint-006-qa-evaluation-engine.md",
+      status: "passed",
+      validatedAt: "2026-06-13T15:55:00.000Z",
+      items: [{ id: "qa-001", label: "Failed criterion.", status: "failed" }],
+    });
+    failures.push("qa_result_validator_should_reject_status_mismatch: mismatch accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "invalid_qa_result") {
+      failures.push("qa_result_validator_should_classify_status_mismatch: wrong error type");
+    }
+  }
+
+  const validEvaluation = validateEvaluationDocument({
+    sprintId: "SPRINT-006",
+    status: "passed",
+    score: 94,
+    checks: {
+      contractCompliance: true,
+      architecture: true,
+      simplicity: true,
+      offlineSupport: true,
+      uiConsistency: true,
+      validation: true,
+    },
+    failures: [],
+    recommendations: ["Keep QA explicit."],
+  }, validQaResult);
+  if (validEvaluation.score !== 94 || validEvaluation.status !== "passed") {
+    failures.push("evaluation_validator_should_accept_score_above_threshold: valid Evaluation rejected");
+  }
+
+  try {
+    validateEvaluationDocument({
+      sprintId: "SPRINT-006",
+      status: "passed",
+      score: 89,
+      checks: {
+        contractCompliance: true,
+        architecture: true,
+        simplicity: true,
+        offlineSupport: true,
+        uiConsistency: true,
+        validation: true,
+      },
+      failures: [],
+      recommendations: [],
+    }, validQaResult);
+    failures.push("evaluation_validator_should_reject_passed_score_below_90: low score accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "evaluation_score_too_low") {
+      failures.push("evaluation_validator_should_classify_low_score: wrong error type");
+    }
+  }
+
+  try {
+    validateEvaluationDocument({
+      sprintId: "SPRINT-006",
+      status: "passed",
+      score: 94,
+      checks: {
+        contractCompliance: true,
+        architecture: true,
+        simplicity: true,
+        offlineSupport: true,
+        uiConsistency: true,
+      },
+      failures: [],
+      recommendations: [],
+    }, validQaResult);
+    failures.push("evaluation_validator_should_reject_missing_validation_check: missing check accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "invalid_evaluation") {
+      failures.push("evaluation_validator_should_classify_missing_check: wrong error type");
+    }
+  }
+
+  try {
+    validateWritableArtifactPath(".mcp-task/specs/authoring.json");
+    failures.push("workspace_write_guard_should_reject_non_markdown_authoring: json accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "unsupported_artifact_type") {
+      failures.push("workspace_write_guard_should_classify_non_markdown_authoring: wrong error type");
+    }
+  }
+
+  try {
+    validateArtifactContent("");
+    failures.push("workspace_write_guard_should_reject_empty_content: empty content accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "invalid_artifact_content") {
+      failures.push("workspace_write_guard_should_classify_empty_content: wrong error type");
+    }
+  }
+
+  const sprintSpecPath = ".mcp-task/specs/sprint-003-spec-authoring.md";
+  const sprintPlanWithSpec = `# Sprint SPRINT-003 - SPEC and Sprint Authoring Flow\n\n## Linked SPEC\n\n${sprintSpecPath}`;
+  if (validateSprintSpecReference(sprintPlanWithSpec, sprintSpecPath) !== sprintSpecPath) {
+    failures.push("workspace_sprint_plan_should_accept_linked_spec_path: linked SPEC rejected");
+  }
+
+  try {
+    validateSprintSpecReference("# Sprint without linked spec", sprintSpecPath);
+    failures.push("workspace_sprint_plan_should_require_spec_path_in_content: missing linked SPEC accepted");
+  } catch (error) {
+    if (!(error instanceof WorkspaceArtifactError) || error.code !== "missing_spec_reference") {
+      failures.push("workspace_sprint_plan_should_classify_missing_spec_path: wrong error type");
+    }
+  }
+
+  const sprintSummary = parseSprintSummary(
+    ".mcp-task/sprints/sprint-002-file-backed-runtime.md",
+    "# Sprint SPRINT-002 - File-Backed Workspace Runtime\n\n## Status\n\n`planned`",
+  );
+  if (sprintSummary.id !== "SPRINT-002" || sprintSummary.status !== "planned") {
+    failures.push("workspace_sprint_parser_should_extract_id_and_status: sprint summary mismatch");
+  }
+
+  const terminalEvents = parseTerminalEvents("mcp-task> loading project context...\nmcp-task> evaluation score: 94%", ".mcp-task/logs/sprint-001.md");
+  if (terminalEvents.length !== 2 || terminalEvents[1]?.level !== "ok") {
+    failures.push("workspace_terminal_parser_should_extract_log_events: terminal events mismatch");
+  }
+
+  const scriptProposals = createPackageScriptProposals(
+    {
+      build: "tsc",
+      "test:golden": "npm run build && node dist/tests/golden/goldenRunner.js",
+      dev: "npm run fullstack",
+    },
+    "2026-06-13T21:00:00.000Z",
+    "win32",
+  );
+  const proposalLabels = scriptProposals.map((proposal) => proposal.label);
+  if (!proposalLabels.includes("npm run build") || !proposalLabels.includes("npm run test:golden") || proposalLabels.includes("npm run dev")) {
+    failures.push("tool_harness_should_generate_validation_presets_from_package_scripts: preset mismatch");
+  }
+  if (scriptProposals.some((proposal) => proposal.command !== "npm.cmd" || proposal.riskLevel !== "low" || proposal.status !== "proposed")) {
+    failures.push("tool_harness_should_create_safe_structured_npm_proposals: proposal shape mismatch");
+  }
+
+  if (classifyCommandRisk("npm.cmd", ["run", "clean"], "rm -rf dist") !== "blocked") {
+    failures.push("tool_harness_should_block_destructive_package_script_body: destructive script not blocked");
+  }
+
+  const validCommandProposal = validateCommandProposal({
+    id: "pkg-build",
+    label: "npm run build",
+    command: "npm.cmd",
+    args: ["run", "build"],
+    source: "package-script",
+    riskLevel: "low",
+    status: "proposed",
+    createdAt: "2026-06-13T21:00:00.000Z",
+  });
+  if (validCommandProposal.args[1] !== "build") {
+    failures.push("tool_harness_should_accept_valid_command_proposal: args mismatch");
+  }
+
+  try {
+    validateCommandProposal({
+      id: "pkg-clean",
+      label: "npm run clean",
+      command: "npm.cmd",
+      args: ["run", "clean"],
+      source: "package-script",
+      riskLevel: "blocked",
+      status: "approved",
+      createdAt: "2026-06-13T21:00:00.000Z",
+      approvedAt: "2026-06-13T21:01:00.000Z",
+    });
+    failures.push("tool_harness_should_reject_approved_blocked_command: blocked approval accepted");
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("Blocked command")) {
+      failures.push("tool_harness_should_classify_approved_blocked_command: wrong error");
+    }
+  }
+
+  try {
+    recordCommandExecutionResult(
+      {
+        sprintId: "SPRINT-007",
+        commands: [validCommandProposal],
+        toolCalls: [],
+        results: [],
+      },
+      {
+        proposalId: "pkg-build",
+        exitCode: 0,
+        stdoutPreview: "ok",
+        stderrPreview: "",
+        startedAt: "2026-06-13T21:02:00.000Z",
+        completedAt: "2026-06-13T21:02:01.000Z",
+      },
+    );
+    failures.push("tool_harness_should_require_approval_before_execution: proposed command executed");
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("approved")) {
+      failures.push("tool_harness_should_classify_unapproved_execution: wrong error");
+    }
+  }
+
+  const approvedState = approveCommandProposal(
+    {
+      sprintId: "SPRINT-007",
+      commands: [validCommandProposal],
+      toolCalls: [],
+      results: [],
+    },
+    "pkg-build",
+    "2026-06-13T21:01:00.000Z",
+  );
+  if (approvedState.commands[0]?.status !== "approved" || !approvedState.commands[0]?.approvedAt) {
+    failures.push("tool_harness_should_persist_explicit_approval: approval missing");
+  }
+
+  const failedExecutionState = recordCommandExecutionResult(approvedState, {
+    proposalId: "pkg-build",
+    exitCode: 1,
+    stdoutPreview: "",
+    stderrPreview: "build failed",
+    startedAt: "2026-06-13T21:02:00.000Z",
+    completedAt: "2026-06-13T21:02:01.000Z",
+  });
+  const executionSummary = summarizeToolExecution(failedExecutionState);
+  if (executionSummary.counts.failed !== 1 || executionSummary.failedCommands[0]?.id !== "pkg-build") {
+    failures.push("tool_harness_should_surface_failed_commands: failed command missing");
+  }
+
+  const validExecutionResult = validateCommandExecutionResult({
+    proposalId: "pkg-build",
+    exitCode: 0,
+    stdoutPreview: "build ok",
+    stderrPreview: "",
+    startedAt: "2026-06-13T21:02:00.000Z",
+    completedAt: "2026-06-13T21:02:01.000Z",
+  });
+  if (validExecutionResult.exitCode !== 0) {
+    failures.push("tool_harness_should_accept_valid_execution_result: result rejected");
+  }
+
+  const validToolCall = validateMcpToolCall({
+    id: "tool-call-1",
+    toolId: "local-command-runner",
+    requestedByAgent: "QA",
+    input: { proposalId: "pkg-build" },
+    status: "proposed",
+    createdAt: "2026-06-13T21:00:00.000Z",
+  });
+  if (validToolCall.toolId !== "local-command-runner") {
+    failures.push("tool_harness_should_accept_registered_mcp_tool_call: tool call rejected");
+  }
+
+  try {
+    validateMcpToolCall({
+      id: "tool-call-2",
+      toolId: "unknown-tool",
+      requestedByAgent: "QA",
+      input: {},
+      status: "proposed",
+      createdAt: "2026-06-13T21:00:00.000Z",
+    });
+    failures.push("tool_harness_should_reject_unknown_mcp_tool_call: unknown tool accepted");
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("registered tool")) {
+      failures.push("tool_harness_should_classify_unknown_mcp_tool_call: wrong error");
+    }
+  }
+
+  const validToolResult = validateMcpToolResult({
+    callId: "tool-call-1",
+    ok: false,
+    error: { code: "COMMAND_FAILED", message: "exit 1" },
+    completedAt: "2026-06-13T21:03:00.000Z",
+  });
+  if (validToolResult.ok) {
+    failures.push("tool_harness_should_accept_failed_mcp_tool_result: result mismatch");
+  }
+
+  const validMemoryDocument = validateMemoryDocument({
+    id: "decision-local-memory",
+    type: "decision",
+    title: "Keep memory local",
+    content: "Use Markdown files for project decisions.",
+    tags: ["memory", "offline"],
+    relatedSprintId: "SPRINT-008",
+    relatedArtifactPaths: [".mcp-task/contracts/sprint-008-local-memory-history.md"],
+    createdAt: "2026-06-14T02:30:00.000Z",
+    updatedAt: "2026-06-14T02:30:00.000Z",
+  });
+  if (validMemoryDocument.type !== "decision" || validMemoryDocument.relatedSprintId !== "SPRINT-008") {
+    failures.push("local_memory_should_accept_valid_memory_document: document mismatch");
+  }
+
+  try {
+    validateMemoryDocument({
+      ...validMemoryDocument,
+      relatedArtifactPaths: ["../secret.md"],
+    });
+    failures.push("local_memory_should_reject_unsafe_related_artifact_path: unsafe path accepted");
+  } catch (error) {
+    if (!(error instanceof LocalMemoryError) || error.code !== "invalid_artifact_path") {
+      failures.push("local_memory_should_classify_unsafe_related_artifact_path: wrong error");
+    }
+  }
+
+  const validDecisionNote = validateDecisionNoteInput({
+    title: "Local memory stays file-backed",
+    content: "Decision notes are Markdown files under .mcp-task/memory/decisions/.",
+    tags: ["decision"],
+    relatedSprintId: "SPRINT-008",
+    relatedArtifactPaths: [".mcp-task/specs/sprint-008-local-memory-history.md"],
+  });
+  if (validDecisionNote.relatedSprintId !== "SPRINT-008") {
+    failures.push("local_memory_should_accept_valid_decision_note: note mismatch");
+  }
+
+  try {
+    validateDecisionNoteInput({
+      title: "Bad decision",
+      content: "Bad path.",
+      relatedArtifactPaths: ["C:/secret.md"],
+    });
+    failures.push("local_memory_should_reject_absolute_decision_path: absolute path accepted");
+  } catch (error) {
+    if (!(error instanceof LocalMemoryError) || error.code !== "invalid_artifact_path") {
+      failures.push("local_memory_should_classify_absolute_decision_path: wrong error");
+    }
+  }
+
+  const validSearchQuery = validateMemorySearchQuery({
+    query: "contract",
+    types: ["artifact", "decision"],
+    sprintId: "SPRINT-008",
+    limit: 5,
+  });
+  if (validSearchQuery.limit !== 5 || validSearchQuery.types?.length !== 2) {
+    failures.push("local_memory_should_accept_valid_search_query: query mismatch");
+  }
+
+  try {
+    validateMemorySearchQuery({ query: "contract", limit: 100 });
+    failures.push("local_memory_should_reject_excessive_search_limit: high limit accepted");
+  } catch (error) {
+    if (!(error instanceof LocalMemoryError) || error.code !== "invalid_search_query") {
+      failures.push("local_memory_should_classify_excessive_search_limit: wrong error");
+    }
+  }
+
+  const relatedSprint008 = findRelatedSprintArtifacts("SPRINT-008", [
+    ".mcp-task/sprints/sprint-008-local-memory-history.md",
+    ".mcp-task/specs/sprint-008-local-memory-history.md",
+    ".mcp-task/contracts/sprint-008-local-memory-history.md",
+    ".mcp-task/qa/sprint-008-qa.json",
+    ".mcp-task/evaluations/sprint-008-evaluation.json",
+    ".mcp-task/progress/sprint-008.json",
+    ".mcp-task/logs/sprint-008.md",
+  ]);
+  if (relatedSprint008.contractPath !== ".mcp-task/contracts/sprint-008-local-memory-history.md") {
+    failures.push("local_memory_should_associate_related_sprint_artifacts: contract not associated");
+  }
+
+  const parsedStatus = parseCliCommand(["status"], "C:/repo", {});
+  if (parsedStatus.name !== "status" || parsedStatus.cwd !== "C:/repo") {
+    failures.push("cli_parser_should_accept_status_command: status parse mismatch");
+  }
+
+  const parsedHelp = parseCliCommand(["--help"], "C:/repo", {});
+  if (parsedHelp.name !== "help") {
+    failures.push("cli_parser_should_accept_help_flag: help flag mismatch");
+  }
+
+  try {
+    parseCliCommand(["publish"], "C:/repo", {});
+    failures.push("cli_parser_should_reject_unknown_command: unknown command accepted");
+  } catch (error) {
+    if (!(error instanceof CliError) || error.code !== "unknown_command" || error.exitCode !== 2) {
+      failures.push("cli_parser_should_classify_unknown_command: wrong error");
+    }
+  }
+
+  const statusOutput = formatCliStatus({
+    productName: "MCP Harness Task Manager",
+    shortName: "mcp-task",
+    currentSprint: "SPRINT-009",
+    sprintStatus: "building",
+    contractReady: true,
+    qaStatus: "missing",
+    evaluationScore: null,
+    doneBlocked: true,
+    memoryDocuments: 2,
+    toolCommands: 3,
+  });
+  for (const expected of ["mcp-task status", "Current sprint: SPRINT-009", "Contract: ready", "Done gate: blocked"]) {
+    if (!statusOutput.includes(expected)) {
+      failures.push(`cli_status_should_format_${expected}: missing output`);
+    }
+  }
+
+  const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
+    name: string;
+    version: string;
+    type: "module";
+    bin?: Record<string, string>;
+    scripts: Record<string, string>;
+  };
+  const packageCheck = validatePackageMetadata(packageJson);
+  if (packageCheck.status !== "passed") {
+    failures.push("cli_package_metadata_should_expose_mcp_task_bin: package metadata invalid");
+  }
+  for (const scriptCheck of validateEssentialScripts(packageJson.scripts)) {
+    if (scriptCheck.status !== "passed") {
+      failures.push(`cli_package_metadata_should_preserve_${scriptCheck.id}: script missing`);
+    }
+  }
+
+  const doctorOutput = formatDoctorChecks([
+    { id: "node-runtime", label: "node runtime available", status: "passed", message: "Node available" },
+    { id: "package-json", label: "package.json found", status: "passed", message: "mcp-task@1.0.0" },
+  ]);
+  if (!doctorOutput.includes("[passed] node runtime available") || !doctorOutput.includes("mcp-task doctor")) {
+    failures.push("cli_doctor_should_format_checks: doctor output mismatch");
+  }
+
+  const readinessChecks = [
+    {
+      id: "workspace-readable",
+      category: "workspace",
+      label: "Workspace readable",
+      status: "passed",
+      evidence: ".mcp-task loaded",
+      required: true,
+    },
+    {
+      id: "cli-local",
+      category: "cli",
+      label: "CLI local",
+      status: "passed",
+      evidence: "status and doctor passed",
+      required: true,
+    },
+    {
+      id: "visual-smoke",
+      category: "ui",
+      label: "Visual smoke",
+      status: "warning",
+      evidence: "manual visual QA remains",
+      required: false,
+    },
+  ] as const;
+  const readinessScore = calculateReadinessScore(readinessChecks as any);
+  if (readinessScore !== 92 || deriveReadinessStatus(readinessScore, readinessChecks as any) !== "ready") {
+    failures.push("mvp_readiness_should_calculate_ready_score_with_optional_warning: readiness mismatch");
+  }
+
+  const validReadiness = validateMvpReadinessReport({
+    sprintId: "SPRINT-010",
+    status: "ready",
+    score: 94,
+    generatedAt: "2026-06-14T03:25:00.000Z",
+    checks: readinessChecks,
+    risks: [
+      {
+        id: "manual-visual-qa",
+        severity: "low",
+        description: "Responsive UI still benefits from manual inspection.",
+        mitigation: "Add browser smoke tests later.",
+      },
+    ],
+    nextActions: ["Keep release work behind a publishing contract."],
+  });
+  if (validReadiness.status !== "ready" || validReadiness.score !== 94) {
+    failures.push("mvp_readiness_should_accept_valid_ready_report: report mismatch");
+  }
+
+  try {
+    validateMvpReadinessReport({
+      sprintId: "SPRINT-010",
+      status: "ready",
+      score: 89,
+      generatedAt: "2026-06-14T03:25:00.000Z",
+      checks: readinessChecks,
+      risks: [],
+      nextActions: [],
+    });
+    failures.push("mvp_readiness_should_reject_ready_score_below_90: low score accepted");
+  } catch (error) {
+    if (!(error instanceof MvpReadinessError) || error.code !== "mvp_not_ready") {
+      failures.push("mvp_readiness_should_classify_ready_score_below_90: wrong error");
+    }
+  }
+
+  try {
+    validateMvpReadinessReport({
+      sprintId: "SPRINT-010",
+      status: "ready",
+      score: 95,
+      generatedAt: "2026-06-14T03:25:00.000Z",
+      checks: [
+        {
+          id: "workspace-readable",
+          category: "workspace",
+          label: "Workspace readable",
+          status: "failed",
+          evidence: ".mcp-task missing",
+          required: true,
+        },
+      ],
+      risks: [],
+      nextActions: [],
+    });
+    failures.push("mvp_readiness_should_reject_ready_with_failed_required_check: failed check accepted");
+  } catch (error) {
+    if (!(error instanceof MvpReadinessError) || error.code !== "mvp_not_ready") {
+      failures.push("mvp_readiness_should_classify_failed_required_check: wrong error");
+    }
+  }
+
+  const readmeContent = readFileSync("README.md", "utf8");
+  const missingReadmeSections = assertRequiredReadmeSections(readmeContent);
+  if (missingReadmeSections.length) {
+    failures.push(`mvp_readiness_should_require_readme_sections: missing ${missingReadmeSections.join(", ")}`);
   }
 
   return { passed: failures.length === 0, failures };

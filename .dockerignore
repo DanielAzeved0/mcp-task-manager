@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.env
+.env.*
+npm-debug.log
+yarn-error.log
+*.tsbuildinfo
+.mcp-task/logs/*.log
+.mcp-task/logs/dev-server*.log
+Dockerfile
+docker-compose.yml

@@ -1,0 +1,19 @@
+{
+  "sprintId": "SPRINT-001",
+  "status": "passed",
+  "score": 94,
+  "checks": {
+    "contractCompliance": true,
+    "architecture": true,
+    "simplicity": true,
+    "offlineSupport": true,
+    "uiConsistency": true,
+    "validation": true
+  },
+  "failures": [],
+  "recommendations": [
+    "Add a file-backed runtime in the next sprint so the UI can read actual .mcp-task artifacts instead of static seeded state.",
+    "Add focused frontend smoke tests when a test runner is introduced.",
+    "Use a managed dev server again only when the frontend requires HTTP-only browser APIs."
+  ]
+}

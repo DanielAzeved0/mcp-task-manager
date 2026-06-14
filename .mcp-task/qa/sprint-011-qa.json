@@ -1,0 +1,50 @@
+{
+  "sprintId": "SPRINT-011",
+  "status": "passed",
+  "checkedAt": "2026-06-14T04:15:00.000Z",
+  "checklist": [
+    {
+      "id": "dockerfile-runtime",
+      "status": "passed",
+      "evidence": "Dockerfile uses deps, build and runtime stages; runtime copies pruned production dependencies."
+    },
+    {
+      "id": "compose-runtime",
+      "status": "passed",
+      "evidence": "docker-compose.yml exposes ${HOST_PORT:-3000}:3000 and bind-mounts .mcp-task plus promptSpecHistory.json."
+    },
+    {
+      "id": "static-ui",
+      "status": "passed",
+      "evidence": "Express serves public/ and frontend uses window.location.origin outside file:// mode."
+    },
+    {
+      "id": "local-build",
+      "status": "passed",
+      "evidence": "npm.cmd run build passed."
+    },
+    {
+      "id": "docker-build",
+      "status": "passed",
+      "evidence": "docker build -t mcp-task:local . passed."
+    },
+    {
+      "id": "container-health",
+      "status": "passed",
+      "evidence": "docker compose up -d --build with HOST_PORT=3010 started a healthy container; GET /health returned 200."
+    },
+    {
+      "id": "golden-suite",
+      "status": "passed",
+      "evidence": "npm.cmd run test:golden returned passed=true."
+    },
+    {
+      "id": "secrets",
+      "status": "passed",
+      "evidence": "No real secrets were added; Compose reads optional environment values from caller environment."
+    }
+  ],
+  "warnings": [
+    "npm ci reported existing dependency vulnerabilities during Docker build; runtime prune reduced the report to 4 moderate vulnerabilities."
+  ]
+}

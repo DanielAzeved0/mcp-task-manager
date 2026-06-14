@@ -1,0 +1,44 @@
+{
+  "sprintId": "SPRINT-007",
+  "commands": [
+    {
+      "id": "pkg-build",
+      "label": "npm run build",
+      "command": "npm.cmd",
+      "args": [
+        "run",
+        "build"
+      ],
+      "source": "package-script",
+      "riskLevel": "low",
+      "status": "proposed",
+      "createdAt": "2026-06-13T21:00:00.000Z"
+    },
+    {
+      "id": "pkg-test-golden",
+      "label": "npm run test:golden",
+      "command": "npm.cmd",
+      "args": [
+        "run",
+        "test:golden"
+      ],
+      "source": "package-script",
+      "riskLevel": "low",
+      "status": "proposed",
+      "createdAt": "2026-06-13T21:00:00.000Z"
+    }
+  ],
+  "toolCalls": [
+    {
+      "id": "tool-call-validation-registry",
+      "toolId": "validation-command-registry",
+      "requestedByAgent": "QA",
+      "input": {
+        "purpose": "List safe validation presets from package.json"
+      },
+      "status": "proposed",
+      "createdAt": "2026-06-13T21:00:00.000Z"
+    }
+  ],
+  "results": []
+}

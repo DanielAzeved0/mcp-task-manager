@@ -1,0 +1,21 @@
+services:
+  mcp-task:
+    build:
+      context: .
+    image: mcp-task:local
+    container_name: mcp-task
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      PREFERRED_BACKEND: ${PREFERRED_BACKEND:-deterministic_builder}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      USE_OLLAMA: ${USE_OLLAMA:-false}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
+    volumes:
+      - ./.mcp-task:/app/.mcp-task
+      - ./promptSpecHistory.json:/app/promptSpecHistory.json
+    restart: unless-stopped

@@ -1,0 +1,44 @@
+{
+  "sprintId": "SPRINT-009",
+  "contractPath": ".mcp-task/contracts/sprint-009-packaging-cli-foundation.md",
+  "status": "passed",
+  "validatedAt": "2026-06-14T03:05:00.000Z",
+  "items": [
+    {
+      "id": "qa-001",
+      "label": "Package metadata is aligned with mcp-task.",
+      "status": "passed",
+      "evidence": "package.json name is mcp-task and bin.mcp-task points to dist/cli/mcp-task.js."
+    },
+    {
+      "id": "qa-002",
+      "label": "Existing scripts remain available.",
+      "status": "passed",
+      "evidence": "Golden tests validate dev, build, test:golden and start scripts."
+    },
+    {
+      "id": "qa-003",
+      "label": "CLI parser handles supported and unknown commands.",
+      "status": "passed",
+      "evidence": "Golden tests cover status, help and unknown command error."
+    },
+    {
+      "id": "qa-004",
+      "label": "CLI status and doctor are local and terminal-friendly.",
+      "status": "passed",
+      "evidence": "Built CLI status, doctor and --help commands executed successfully after build."
+    },
+    {
+      "id": "qa-005",
+      "label": "No publishing or cloud automation was introduced.",
+      "status": "passed",
+      "evidence": "No publish scripts, release automation or new dependencies were added."
+    },
+    {
+      "id": "qa-006",
+      "label": "Local validation commands passed.",
+      "status": "passed",
+      "evidence": "node --check public/app.js, npm.cmd run build, npm.cmd run test:golden, node dist/cli/mcp-task.js status, doctor and --help passed."
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "productName": "MCP Harness Task Manager",
+  "shortName": "mcp-task",
+  "currentSprint": "SPRINT-010",
+  "roadmap": {
+    "currentVersion": "roadmap.md",
+    "plannedSprints": [
+      "SPRINT-002",
+      "SPRINT-003",
+      "SPRINT-004",
+      "SPRINT-005",
+      "SPRINT-006",
+      "SPRINT-007",
+      "SPRINT-008",
+      "SPRINT-009",
+      "SPRINT-010"
+    ]
+  },
+  "pipeline": [
+    "SPEC",
+    "Contract",
+    "Build",
+    "QA",
+    "Evaluation",
+    "Done"
+  ],
+  "offlineFirst": true,
+  "terminalExecution": "explicit-user-approved"
+}

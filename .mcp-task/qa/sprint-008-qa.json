@@ -1,0 +1,44 @@
+{
+  "sprintId": "SPRINT-008",
+  "contractPath": ".mcp-task/contracts/sprint-008-local-memory-history.md",
+  "status": "passed",
+  "validatedAt": "2026-06-14T02:45:00.000Z",
+  "items": [
+    {
+      "id": "qa-001",
+      "label": "Memory document schema is validated.",
+      "status": "passed",
+      "evidence": "Golden tests validate valid memory documents and unsafe related artifact rejection."
+    },
+    {
+      "id": "qa-002",
+      "label": "Sprint history association is deterministic.",
+      "status": "passed",
+      "evidence": "Golden tests validate SPRINT-008 artifact association by sprint id."
+    },
+    {
+      "id": "qa-003",
+      "label": "Local search query validation is enforced.",
+      "status": "passed",
+      "evidence": "Golden tests validate search query shape and reject excessive limits."
+    },
+    {
+      "id": "qa-004",
+      "label": "Decision notes are validated.",
+      "status": "passed",
+      "evidence": "Golden tests validate decision note input and reject unsafe absolute paths."
+    },
+    {
+      "id": "qa-005",
+      "label": "No database, vector database or cloud memory was introduced.",
+      "status": "passed",
+      "evidence": "Implementation uses .mcp-task Markdown/JSON files only."
+    },
+    {
+      "id": "qa-006",
+      "label": "Local validation commands passed.",
+      "status": "passed",
+      "evidence": "node --check public/app.js, npm.cmd run build and npm.cmd run test:golden passed."
+    }
+  ]
+}

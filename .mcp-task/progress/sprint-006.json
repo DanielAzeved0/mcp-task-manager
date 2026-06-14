@@ -1,0 +1,78 @@
+{
+  "sprintId": "SPRINT-006",
+  "stage": "Evaluation",
+  "status": "passed",
+  "updatedAt": "2026-06-13T16:00:00.000Z",
+  "agents": [
+    {
+      "name": "Planner",
+      "role": "Planner",
+      "goal": "Keep sprint scope aligned with SPEC and roadmap.",
+      "allowed_actions": ["read_specs", "update_sprint_plan", "record_planning_events"],
+      "forbidden_actions": ["implement_production_code"],
+      "inputs": ["roadmap", "SPEC"],
+      "outputs": ["sprint_plan", "planning_events"],
+      "status": "complete"
+    },
+    {
+      "name": "Contract",
+      "role": "Contract",
+      "goal": "Define Builder and QA responsibilities before implementation.",
+      "allowed_actions": ["create_contract", "validate_contract_fields"],
+      "forbidden_actions": ["execute_build", "mark_done"],
+      "inputs": ["SPEC", "sprint_plan"],
+      "outputs": ["contract", "contract_gate"],
+      "status": "complete"
+    },
+    {
+      "name": "Builder",
+      "role": "Builder",
+      "goal": "Implement only the approved Contract scope.",
+      "allowed_actions": ["edit_allowed_files", "record_build_events"],
+      "forbidden_actions": ["self_validate_completion", "expand_scope"],
+      "inputs": ["contract"],
+      "outputs": ["implementation", "build_events"],
+      "status": "complete"
+    },
+    {
+      "name": "QA",
+      "role": "QA",
+      "goal": "Validate Contract checklist item by item.",
+      "allowed_actions": ["run_validation", "record_failures", "record_passes"],
+      "forbidden_actions": ["expand_scope", "skip_contract_items"],
+      "inputs": ["contract", "implementation"],
+      "outputs": ["qa_result"],
+      "status": "complete"
+    },
+    {
+      "name": "Evaluator",
+      "role": "Evaluator",
+      "goal": "Score sprint result only after QA.",
+      "allowed_actions": ["score_sprint", "record_evaluation"],
+      "forbidden_actions": ["skip_qa", "override_failed_contract"],
+      "inputs": ["qa_result", "validation_results"],
+      "outputs": ["evaluation"],
+      "status": "complete"
+    }
+  ],
+  "events": [
+    {
+      "id": "evt-sprint-006-001",
+      "sprintId": "SPRINT-006",
+      "agent": "QA",
+      "type": "validated",
+      "message": "QA checklist passed against Contract.",
+      "timestamp": "2026-06-13T15:55:00.000Z",
+      "artifactPath": ".mcp-task/qa/sprint-006-qa.json"
+    },
+    {
+      "id": "evt-sprint-006-002",
+      "sprintId": "SPRINT-006",
+      "agent": "Evaluator",
+      "type": "completed",
+      "message": "Evaluation score 94 recorded.",
+      "timestamp": "2026-06-13T16:00:00.000Z",
+      "artifactPath": ".mcp-task/evaluations/sprint-006-evaluation.json"
+    }
+  ]
+}

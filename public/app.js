@@ -1,807 +1,916 @@
-// Mock MCP useWidget hook for browser environment
-        const mockUseWidget = () => ({
-            props: {
-                apiEndpoint: "http://localhost:3000/prompt-to-spec",
-                defaultBackend: "auto",
-                defaultStrictMode: false
-            },
-            isPending: false,
-            theme: "light"
-        });
+const pipeline = [
+  { id: "spec", label: "SPEC", status: "done" },
+  { id: "sprint", label: "Sprint Plan", status: "done" },
+  { id: "contract", label: "Contract", status: "active" },
+  { id: "build", label: "Build", status: "queued" },
+  { id: "qa", label: "QA", status: "queued" },
+  { id: "evaluation", label: "Evaluation", status: "queued" },
+  { id: "done", label: "Done", status: "queued" },
+];
 
-        // History storage using localStorage
-        const useHistory = () => {
-            const [history, setHistory] = React.useState(() => {
-                try {
-                    const saved = localStorage.getItem('promptHistory');
-                    return saved ? JSON.parse(saved) : [];
-                } catch {
-                    return [];
-                }
-            });
+const fallbackAgents = [
+  { name: "Planner", goal: "Sprint scope", status: "complete" },
+  { name: "Contract", goal: "Gatekeeping", status: "complete" },
+  { name: "Builder", goal: "Contract-limited implementation", status: "active" },
+  { name: "QA", goal: "Contract checklist", status: "idle" },
+  { name: "Evaluator", goal: "Sprint score", status: "idle" },
+];
 
-            const addToHistory = React.useCallback((item) => {
-                const newHistory = [item, ...history.slice(0, 9)]; // Keep last 10 items
-                setHistory(newHistory);
-                try {
-                    localStorage.setItem('promptHistory', JSON.stringify(newHistory));
-                } catch (e) {
-                    console.warn('Failed to save history:', e);
-                }
-            }, [history]);
+const state = {
+  backendBaseUrl: window.location.protocol === "file:" ? "http://localhost:3000" : window.location.origin,
+  selectedTool: "filesystem",
+  activeArtifactPath: null,
+  workspace: null,
+  memoryIndex: null,
+  memorySearchQuery: "",
+  memorySearchResults: null,
+  decisionTitle: "",
+  decisionContent: "",
+  artifact: null,
+  editorContent: "",
+  savedContent: "",
+  loading: true,
+  artifactLoading: false,
+  saving: false,
+  saveStatus: "idle",
+  error: null,
+  saveError: null,
+};
 
-            return { history, addToHistory };
-        };
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
 
-        const PromptWidget = () => {
-            const { props, isPending, theme } = mockUseWidget();
-            const { history, addToHistory } = useHistory();
-            const isDark = theme === "dark";
+function statusDot(status) {
+  return `<span class="status-dot ${status}" aria-hidden="true"></span>`;
+}
 
-            const [prompt, setPrompt] = React.useState("");
-            const [preferredBackend, setPreferredBackend] = React.useState("auto");
-            const [strictMode, setStrictMode] = React.useState(false);
-            const [isLoading, setIsLoading] = React.useState(false);
-            const [result, setResult] = React.useState(null);
-            const [error, setError] = React.useState(null);
-            const [feedbackScore, setFeedbackScore] = React.useState(null);
-            const [showHistory, setShowHistory] = React.useState(false);
-            const [runtimeApiEndpoint, setRuntimeApiEndpoint] = React.useState(props?.apiEndpoint || "http://localhost:3000/prompt-to-spec");
-            const [backendReady, setBackendReady] = React.useState(false);
-            const [connectionError, setConnectionError] = React.useState(null);
-            const [backendPort, setBackendPort] = React.useState(null);
-            const [backendHealth, setBackendHealth] = React.useState(null);
-            const [backendInitAttempt, setBackendInitAttempt] = React.useState(0);
-            const [initializingBackend, setInitializingBackend] = React.useState(true);
+function artifactType(path) {
+  if (!path) return "Markdown";
+  return path.endsWith(".json") ? "JSON" : path.endsWith(".md") ? "Markdown" : "Text";
+}
 
-            const apiEndpoint = runtimeApiEndpoint;
+function artifactIsEditable(artifact) {
+  return Boolean(
+    artifact?.path?.endsWith(".md") &&
+      (artifact.path.startsWith(".mcp-task/specs/") ||
+        artifact.path.startsWith(".mcp-task/contracts/") ||
+        (artifact.path.startsWith(".mcp-task/sprints/") && artifact.path !== ".mcp-task/sprints/roadmap.md")),
+  );
+}
 
-            React.useEffect(() => {
-                let mounted = true;
-                const maxAttempts = 5;
+function isDirty() {
+  return state.editorContent !== state.savedContent;
+}
 
-                const loadBackendConfig = async () => {
-                    try {
-                        const configResponse = await fetch("/backend-config.json", { cache: "no-store" });
-                        if (!configResponse.ok) {
-                            throw new Error(`Falha ao ler configuração do backend: ${configResponse.status}`);
-                        }
+function renderShell() {
+  const root = document.getElementById("root");
+  const workspace = state.workspace;
+  const productName = workspace?.productName || "MCP Harness Task Manager";
+  const shortName = workspace?.shortName || "mcp-task";
+  const currentSprint = workspace?.currentSprint || "SPRINT-006";
+  const evaluation = workspace?.evaluation;
+  const contractGate = workspace?.contractGate;
+  const qaResult = workspace?.qaResult;
+  const evaluationGate = workspace?.evaluationGate;
+  const toolExecution = workspace?.toolExecution;
+  const localMemory = workspace?.localMemory;
+  const memoryIndex = state.memoryIndex;
+  const progress = workspace?.progress;
+  const agentStates = workspace?.agents?.length ? workspace.agents : fallbackAgents;
+  const sprints = workspace?.sprints || [];
+  const artifacts = workspace?.artifacts || [];
+  const terminalEvents = workspace?.terminalEvents?.length
+    ? workspace.terminalEvents
+    : [{ level: state.error ? "warn" : "info", text: state.error || "mcp-task> loading workspace..." }];
+  const editable = artifactIsEditable(state.artifact);
 
-                        const config = await configResponse.json();
-                        const baseUrl = config.active_port ? `http://localhost:${config.active_port}` : "http://localhost:3000";
-                        const healthUrl = `${baseUrl}${config.health_endpoint || "/health"}`;
+  root.innerHTML = `
+    <main class="ide-shell">
+      <header class="top-bar">
+        <div class="brand-block">
+          <div class="window-controls" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <p class="eyebrow">${escapeHtml(shortName)}</p>
+            <h1>${escapeHtml(productName)}</h1>
+          </div>
+        </div>
 
-                        const healthResponse = await fetch(healthUrl, { cache: "no-store" });
-                        if (!healthResponse.ok) {
-                            throw new Error(`Health check falhou: ${healthResponse.status}`);
-                        }
+        <div class="pipeline-status" aria-label="Current pipeline status">
+          ${statusDot(state.error ? "queued" : "active")}
+          <span>${state.loading ? "Carregando workspace" : state.error ? "Backend local indisponivel" : contractGate?.buildBlocked ? "Build bloqueado" : "Contract pronto"}</span>
+          <strong>${escapeHtml(currentSprint)}</strong>
+        </div>
 
-                        const healthJson = await healthResponse.json();
-                        if (healthJson?.status !== "ok") {
-                            throw new Error("Health check retornou status inválido");
-                        }
+        <div class="top-actions">
+          <button class="icon-button" type="button" title="Recarregar workspace" aria-label="Recarregar workspace" data-refresh>R</button>
+          <button class="secondary-action" type="button" ${state.error ? "disabled" : ""} data-new-spec>Nova SPEC</button>
+          <button class="secondary-action" type="button" ${state.error ? "disabled" : ""} data-new-sprint>Novo Sprint</button>
+          <button class="secondary-action" type="button" ${state.error ? "disabled" : ""} data-new-contract>Novo Contract</button>
+          <button class="secondary-action" type="button" ${state.error ? "disabled" : ""} data-generate-tool-presets>Presets</button>
+          <button class="primary-action" type="button" ${state.error || contractGate?.buildBlocked ? "disabled" : ""} data-build-gate>Build</button>
+          <button class="primary-action" type="button" ${state.error || evaluationGate?.doneBlocked ? "disabled" : ""} data-done-gate>Done</button>
+        </div>
+      </header>
 
-                        const pingResponse = await fetch(`${baseUrl}/prompt-to-spec`, {
-                            method: "POST",
-                            headers: {
-                                "Content-Type": "application/json",
-                            },
-                            body: JSON.stringify({
-                                prompt: "Backend health check",
-                                preferred_backend: "auto",
-                                strict_json: true,
-                                user_id: "health_check",
-                                team_id: "health_check",
-                            }),
-                        });
+      <section class="workspace-grid">
+        <aside class="left-sidebar" aria-label="Project navigation">
+          <nav class="nav-section">
+            <h2>Pipeline</h2>
+            ${currentPipeline(contractGate, progress, evaluationGate).map((step) => `
+              <button class="nav-item ${step.status}" type="button">
+                ${statusDot(step.status)}
+                <span>${escapeHtml(step.label)}</span>
+              </button>
+            `).join("")}
+          </nav>
 
-                        if (!pingResponse.ok) {
-                            throw new Error(`Ping /prompt-to-spec falhou: ${pingResponse.status}`);
-                        }
+          <div class="nav-section">
+            <h2>Sprints</h2>
+            ${sprints.length ? sprints.map((sprint) => `
+              <button class="nav-item ${sprint.id === currentSprint ? "active" : ""}" type="button" data-artifact-path="${escapeHtml(sprint.path)}">
+                ${statusDot(sprint.status === "passed" || sprint.status === "done" ? "done" : sprint.status === "planned" ? "queued" : "active")}
+                <span>${escapeHtml(sprint.id)} ${escapeHtml(sprint.title)}</span>
+              </button>
+            `).join("") : `<p class="empty-state">Nenhuma sprint local encontrada.</p>`}
+          </div>
 
-                        const pingJson = await pingResponse.json();
-                        if (!pingJson?.prompt_spec) {
-                            throw new Error("Ping /prompt-to-spec retornou resposta inválida");
-                        }
+          <div class="nav-section">
+            <h2>MCP Tools</h2>
+            ${["filesystem", "memory", "terminal", "registry"].map((tool) => `
+              <button class="nav-item ${state.selectedTool === tool ? "selected" : ""}" type="button" data-tool="${tool}">
+                <span class="tool-glyph">${tool.slice(0, 2).toUpperCase()}</span>
+                <span>${escapeHtml(tool)}</span>
+              </button>
+            `).join("")}
+          </div>
 
-                        if (!mounted) return;
-                        setBackendPort(config.active_port);
-                        setBackendHealth(healthJson);
-                        setRuntimeApiEndpoint(`${baseUrl}/prompt-to-spec`);
-                        setBackendReady(true);
-                        setConnectionError(null);
-                        setInitializingBackend(false);
-                    } catch (err) {
-                        if (!mounted) return;
-                        const message = err instanceof Error ? err.message : "Erro ao conectar com o backend";
-                        setBackendReady(false);
-                        setConnectionError(message);
-                        setInitializingBackend(true);
+          <div class="nav-section">
+            <h2>Agents</h2>
+            ${agentStates.map((agent) => `
+              <div class="agent-row">
+                ${statusDot(agentStatusClass(agent.status))}
+                <div><strong>${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.goal || agent.role || "Agent")}</span></div>
+              </div>
+            `).join("")}
+          </div>
+        </aside>
 
-                        if (backendInitAttempt + 1 < maxAttempts) {
-                            const timeout = 2000 * (backendInitAttempt + 1);
-                            setTimeout(() => {
-                                if (mounted) {
-                                    setBackendInitAttempt((prev) => prev + 1);
-                                }
-                            }, timeout);
-                        } else {
-                            setInitializingBackend(false);
-                        }
-                    }
-                };
+        <section class="editor-area" aria-label="Main task documents">
+          <div class="tabs" role="tablist" aria-label="Workspace artifacts">${renderTabs(artifacts)}</div>
 
-                loadBackendConfig();
-                return () => { mounted = false; };
-            }, [backendInitAttempt]);
+          <div class="editor-toolbar">
+            <div>
+              <strong class="editor-toolbar-title">${escapeHtml(activeTitle())}</strong>
+              <span class="editor-toolbar-type">${escapeHtml(activeType())}</span>
+              <span class="save-pill ${saveClass()}">${escapeHtml(saveLabel())}</span>
+            </div>
+            <div class="toolbar-actions">
+              <button class="primary-action" type="button" ${!editable || !isDirty() || state.saving ? "disabled" : ""} data-save-artifact>
+                ${state.saving ? "Salvando" : "Salvar"}
+              </button>
+            </div>
+          </div>
 
-            const handleSubmit = async (e) => {
-                e.preventDefault();
+          <article class="document-pane ${editable ? "editing" : ""}">
+            <ol class="line-numbers" aria-hidden="true">${renderLineNumbers()}</ol>
+            ${editable
+              ? `<textarea class="markdown-editor" spellcheck="false" aria-label="Editor Markdown">${escapeHtml(state.editorContent)}</textarea>`
+              : `<pre>${escapeHtml(activeContent())}</pre>`}
+          </article>
 
-                if (!prompt.trim()) {
-                    setError("Por favor, digite um prompt antes de enviar.");
-                    return;
-                }
+          <section class="task-details" aria-label="Current task details">
+            <div>
+              <p class="eyebrow">Sprint atual</p>
+              <h2>${escapeHtml(currentSprint)}</h2>
+            </div>
+            <p>${escapeHtml(authoringMessage())}</p>
+          </section>
+        </section>
 
-                if (!backendReady) {
-                    setError(connectionError || "Backend não está disponível no momento. Aguarde a verificação de saúde do backend.");
-                    return;
-                }
+        <aside class="right-sidebar" aria-label="Sprint status">
+          <section class="status-panel">
+            <h2>Sprint status</h2>
+            <div class="score-ring" aria-label="Evaluation score ${evaluationGate?.score ?? evaluation?.score ?? 0} percent">
+              <strong>${evaluationGate?.score ?? evaluation?.score ?? "--"}</strong><span>/100</span>
+            </div>
+            <p>${escapeHtml(evaluationGate?.message || (evaluation ? `${evaluation.sprintId} ${evaluation.status}` : "Nenhuma avaliacao carregada."))}</p>
+          </section>
 
-                setIsLoading(true);
-                setError(null);
-                setResult(null);
+          <section class="status-panel">
+            <h2>Artifacts</h2>
+            <div class="artifact-list">
+              ${artifacts.length ? artifacts.map((artifact) => `
+                <button class="${artifact.path === state.activeArtifactPath ? "active" : ""}" type="button" data-artifact-path="${escapeHtml(artifact.path)}">
+                  <span>${escapeHtml(artifact.kind)}</span>
+                  <strong>${escapeHtml(artifact.title)}</strong>
+                </button>
+              `).join("") : `<p class="empty-state">Sem artefatos locais.</p>`}
+            </div>
+          </section>
 
-                try {
-                    const response = await fetch(apiEndpoint, {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                        },
-                        body: JSON.stringify({
-                            prompt: prompt.trim(),
-                            preferred_backend: preferredBackend,
-                            strict_mode: strictMode,
-                            user_id: "user_001",
-                            team_id: "team_001",
-                        }),
-                    });
+          <section class="status-panel">
+            <h2>Contract gate</h2>
+            <p class="gate-message ${contractGate?.buildBlocked ? "blocked" : "ready"}">${escapeHtml(contractGate?.message || "Contract status unavailable.")}</p>
+            <div class="checklist">
+              ${contractChecklist(contractGate).map(([label, checked]) => `
+                <label><input type="checkbox" ${checked ? "checked" : ""} readonly><span>${escapeHtml(label)}</span></label>
+              `).join("")}
+            </div>
+          </section>
 
-                    if (!response.ok) {
-                        let errorMessage = `Falha na requisicao da API: ${response.status}`;
-                        try {
-                            const errorBody = await response.json();
-                            if (errorBody && errorBody.message) {
-                                const required = Array.isArray(errorBody.required_fields) && errorBody.required_fields.length
-                                    ? ` Campos obrigatorios: ${errorBody.required_fields.join(", ")}`
-                                    : "";
-                                errorMessage = `${errorBody.message}${required}`;
-                            }
-                        } catch (_) {
-                            // Keep fallback HTTP message when response body is not JSON.
-                        }
-                        throw new Error(errorMessage);
-                    }
-                    const data = await response.json();
-                    setResult(data);
+          <section class="status-panel">
+            <h2>Execution harness</h2>
+            ${renderToolExecutionPanel(toolExecution)}
+          </section>
 
-                    // Add to history
-                    addToHistory({
-                        id: Date.now(),
-                        prompt: prompt.trim(),
-                        backend: preferredBackend,
-                        strictMode,
-                        result: data,
-                        timestamp: new Date().toISOString()
-                    });
+          <section class="status-panel">
+            <h2>Local memory</h2>
+            ${renderLocalMemoryPanel(localMemory, memoryIndex)}
+          </section>
 
-                } catch (err) {
-                    setError(err.message || "Ocorreu um erro");
-                } finally {
-                    setIsLoading(false);
-                }
-            };
+          <section class="status-panel">
+            <h2>Activity timeline</h2>
+            <ol class="activity-list">
+              ${activityEvents(progress).map((event) => `
+                <li>
+                  <time>${escapeHtml(shortTime(event.timestamp))}</time>
+                  <span><strong>${escapeHtml(event.agent)}</strong> ${escapeHtml(event.message)}</span>
+                </li>
+              `).join("")}
+            </ol>
+          </section>
 
-            const handleFeedback = async (score) => {
-                if (!result || !backendReady) return;
+          <section class="status-panel">
+            <h2>QA checklist</h2>
+            <div class="checklist qa-checklist">
+              ${qaChecklist(qaResult).map((item) => `
+                <label class="${escapeHtml(item.status)}">
+                  <input type="checkbox" ${item.status === "passed" ? "checked" : ""} readonly>
+                  <span>${escapeHtml(item.label)}</span>
+                </label>
+              `).join("")}
+            </div>
+          </section>
 
-                try {
-                    await fetch(apiEndpoint, {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                        },
-                        body: JSON.stringify({
-                            prompt: result.prompt_spec ? "feedback_update" : prompt,
-                            preferred_backend: preferredBackend,
-                            strict_mode: strictMode,
-                            feedback_score: score,
-                            user_id: "user_001",
-                            team_id: "team_001",
-                        }),
-                    });
-                    setFeedbackScore(score);
-                    alert(`Obrigado pelo feedback! Você deu nota ${score}/10`);
-                } catch (err) {
-                    alert("Erro ao enviar feedback: " + err.message);
-                }
-            };
+          <section class="status-panel">
+            <h2>Quality checklist</h2>
+            <div class="checklist">
+              ${qualityChecklist().map(([label, checked]) => `
+                <label><input type="checkbox" ${checked ? "checked" : ""} readonly><span>${escapeHtml(label)}</span></label>
+              `).join("")}
+            </div>
+          </section>
+        </aside>
+      </section>
 
-            const loadFromHistory = (item) => {
-                setPrompt(item.prompt);
-                setPreferredBackend(item.backend);
-                setStrictMode(item.strictMode);
-                setResult(item.result);
-                setShowHistory(false);
-            };
+      <section class="bottom-panel" aria-label="Visual terminal and logs">
+        <div class="panel-tabs">
+          <button class="active" type="button">Terminal</button>
+          <button type="button">Agent logs</button>
+          <button type="button">Pipeline events</button>
+        </div>
+        <div class="terminal">
+          ${terminalEvents.map((event) => `<p class="${escapeHtml(event.level)}">${escapeHtml(event.text)}</p>`).join("")}
+          <p class="cursor-line">mcp-task&gt; <span class="cursor"></span></p>
+        </div>
+      </section>
+    </main>
+  `;
 
-            const copyToClipboard = async (text) => {
-                try {
-                    await navigator.clipboard.writeText(text);
-                    alert("JSON copiado para a área de transferência!");
-                } catch (err) {
-                    // Fallback for older browsers
-                    const textArea = document.createElement("textarea");
-                    textArea.value = text;
-                    document.body.appendChild(textArea);
-                    textArea.select();
-                    document.execCommand("copy");
-                    document.body.removeChild(textArea);
-                    alert("JSON copiado para a área de transferência!");
-                }
-            };
+  bindEvents();
+}
 
-            const getStatusColor = (status) => {
-                switch (status) {
-                    case "success": return "#10b981";
-                    case "improved": return "#f59e0b";
-                    case "failed": return "#ef4444";
-                    default: return "#6b7280";
-                }
-            };
+function renderTabs(artifacts) {
+  if (state.loading) return `<button class="active" type="button">loading.md</button>`;
+  if (state.error) return `<button class="active" type="button">workspace-error.md</button>`;
 
-            const getBackendBadgeColor = (backend) => {
-                switch (backend) {
-                    case "llama": return "#10b981";
-                    case "ollama": return "#10b981";
-                    case "gemini": return "#3b82f6";
-                    case "fallback": return "#6b7280";
-                    default: return "#6b7280";
-                }
-            };
+  const preferred = artifacts.filter((artifact) => ["roadmap", "spec", "sprint", "contract", "evaluation"].includes(artifact.kind));
+  return preferred.slice(0, 8).map((artifact) => `
+    <button class="${artifact.path === state.activeArtifactPath ? "active" : ""}" type="button" role="tab" data-artifact-path="${escapeHtml(artifact.path)}">
+      ${escapeHtml(artifact.title)}
+    </button>
+  `).join("");
+}
 
-            const highlightJson = (jsonString) => {
-                return jsonString
-                    .replace(/"([^"]+)":/g, '<span style="color: #e11d48;">"$1"</span>:')
-                    .replace(/: "([^"]+)"/g, ': <span style="color: #059669;">"$1"</span>')
-                    .replace(/: ([0-9]+|true|false|null)/g, ': <span style="color: #dc2626;">$1</span>');
-            };
+function currentPipeline(contractGate, progress, evaluationGate) {
+  const stage = progress?.stage;
+  return pipeline.map((step) => {
+    if (step.id === "build") {
+      return { ...step, status: contractGate && !contractGate.buildBlocked ? "active" : "queued" };
+    }
+    if (step.id === "contract") {
+      return { ...step, status: contractGate && !contractGate.buildBlocked ? "done" : "active" };
+    }
+    if (stage && step.label === stage) {
+      return { ...step, status: "active" };
+    }
+    if (step.id === "done") {
+      return { ...step, status: evaluationGate && !evaluationGate.doneBlocked ? "done" : "queued" };
+    }
+    if (step.id === "evaluation" && evaluationGate) {
+      return { ...step, status: evaluationGate.doneBlocked ? "active" : "done" };
+    }
+    return step;
+  });
+}
 
-            if (isPending) {
-                return React.createElement("div", {
-                    style: {
-                        padding: 20,
-                        textAlign: "center",
-                        color: isDark ? "#9ca3af" : "#6b7280"
-                    }
-                }, "Carregando Prompt Widget...");
-            }
+function agentStatusClass(status) {
+  if (status === "complete") return "complete";
+  if (status === "active") return "running";
+  if (status === "blocked") return "queued";
+  if (status === "failed") return "error";
+  return "queued";
+}
 
-            return React.createElement("div", {
-                style: {
-                    minHeight: "100vh",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    padding: 20,
-                    background: isDark ? "#111827" : "#f9fafb",
-                    fontFamily: "system-ui, -apple-system, sans-serif",
-                }
-            }, React.createElement("div", {
-                style: {
-                    width: "100%",
-                    maxWidth: 900,
-                    background: isDark ? "#1f2937" : "#ffffff",
-                    borderRadius: 12,
-                    padding: 32,
-                    boxShadow: "0 10px 25px rgba(0, 0, 0, 0.1)",
-                }
-            }, [
-                // Header
-                React.createElement("div", { key: "header", style: { textAlign: "center", marginBottom: 32 } }, [
-                    React.createElement("h1", {
-                        key: "title",
-                        style: {
-                            margin: "0 0 16px 0",
-                            color: isDark ? "#ffffff" : "#1f2937",
-                            fontSize: 32,
-                            fontWeight: 700,
-                        }
-                    }, "MCP Prompt Generator"),
-                    React.createElement("p", {
-                        key: "subtitle",
-                        style: {
-                            margin: 0,
-                            color: isDark ? "#9ca3af" : "#6b7280",
-                            fontSize: 16,
-                            lineHeight: 1.5,
-                        }
-                    }, "Converta prompts em linguagem natural em Especificações de Prompt estruturadas usando IA"),
-                    React.createElement("button", {
-                        key: "history-btn",
-                        onClick: () => setShowHistory(!showHistory),
-                        style: {
-                            marginTop: 16,
-                            padding: "8px 16px",
-                            background: "#6b7280",
-                            color: "#ffffff",
-                            border: "none",
-                            borderRadius: 6,
-                            cursor: "pointer",
-                            fontSize: 14,
-                        }
-                    }, showHistory ? "Ocultar Histórico" : `Mostrar Histórico (${history.length})`)
-                ]),
+function activeTitle() {
+  if (state.artifact) return state.artifact.title;
+  if (state.loading) return "loading.md";
+  if (state.error) return "workspace-error.md";
+  return "empty-workspace.md";
+}
 
-                // History Panel
-                showHistory && history.length > 0 && React.createElement("div", {
-                    key: "history",
-                    style: {
-                        marginBottom: 32,
-                        padding: 20,
-                        background: isDark ? "#111827" : "#f8fafc",
-                        borderRadius: 8,
-                        border: `1px solid ${isDark ? "#374151" : "#e2e8f0"}`,
-                    }
-                }, [
-                    React.createElement("h3", {
-                        key: "history-title",
-                        style: {
-                            margin: "0 0 16px 0",
-                            color: isDark ? "#ffffff" : "#1f2937",
-                            fontSize: 18,
-                        }
-                    }, "Histórico de Prompts"),
-                    React.createElement("div", { key: "history-list" },
-                        history.map(item => React.createElement("div", {
-                            key: item.id,
-                            style: {
-                                padding: 12,
-                                marginBottom: 8,
-                                background: isDark ? "#374151" : "#ffffff",
-                                borderRadius: 6,
-                                cursor: "pointer",
-                                border: `1px solid ${isDark ? "#4b5563" : "#e5e7eb"}`,
-                            },
-                            onClick: () => loadFromHistory(item)
-                        }, [
-                            React.createElement("div", {
-                                key: "prompt",
-                                style: {
-                                    fontWeight: 600,
-                                    marginBottom: 4,
-                                    color: isDark ? "#ffffff" : "#1f2937",
-                                }
-                            }, item.prompt.length > 50 ? item.prompt.substring(0, 50) + "..." : item.prompt),
-                            React.createElement("div", {
-                                key: "meta",
-                                style: {
-                                    fontSize: 12,
-                                    color: isDark ? "#9ca3af" : "#6b7280",
-                                }
-                            }, `${item.backend} • ${new Date(item.timestamp).toLocaleString('pt-BR')} • ${item.result?.status || 'N/A'}`)
-                        ]))
-                    )
-                ]),
+function activeType() {
+  if (state.artifact) return artifactType(state.artifact.path);
+  return "Markdown";
+}
 
-                // Form
-                React.createElement("form", { key: "form", onSubmit: handleSubmit, style: { marginBottom: 40 } }, [
-                    React.createElement("div", { key: "prompt-field", style: { marginBottom: 24 } }, [
-                        React.createElement("label", {
-                            key: "label",
-                            style: {
-                                display: "block",
-                                marginBottom: 12,
-                                fontWeight: 600,
-                                fontSize: 15,
-                                color: isDark ? "#ffffff" : "#374151",
-                            }
-                        }, "Digite seu prompt, codigo ou contexto"),
-                        React.createElement("textarea", {
-                            key: "textarea",
-                            value: prompt,
-                            onChange: (e) => setPrompt(e.target.value),
-                            placeholder: "Exemplo:\n\nrefatore esse codigo para melhorar a legibilidade\n\nfunction processarUsuarios(users: any[]) {\n  let resultado: any[] = [];\n  return resultado;\n}",
-                            style: {
-                                width: "100%",
-                                minHeight: 260,
-                                padding: 16,
-                                border: `2px solid ${isDark ? "#374151" : "#d1d5db"}`,
-                                borderRadius: 8,
-                                background: isDark ? "#374151" : "#ffffff",
-                                color: isDark ? "#ffffff" : "#1f2937",
-                                fontSize: 16,
-                                resize: "vertical",
-                                fontFamily: "Monaco, 'Bitstream Vera Sans Mono', 'Lucida Console', Terminal, monospace",
-                                outline: "none",
-                            }
-                        })
-                    ]),
+function activeContent() {
+  if (state.artifactLoading) return "mcp-task> loading artifact...";
+  if (state.artifact) return state.editorContent;
+  if (state.loading) return "# Loading workspace\n\nReading .mcp-task artifacts from the local backend.";
+  if (state.error) return `# Workspace unavailable\n\n${state.error}\n\nStart the backend locally to load real .mcp-task artifacts.`;
+  return "# Empty workspace\n\nNo supported .mcp-task artifacts were found.";
+}
 
-                    React.createElement("div", {
-                        key: "controls",
-                        style: {
-                            display: "grid",
-                            gridTemplateColumns: "1fr 1fr auto auto",
-                            gap: 16,
-                            marginBottom: 32,
-                            alignItems: "end",
-                        }
-                    }, [
-                        React.createElement("div", { key: "backend" }, [
-                            React.createElement("label", {
-                                key: "label",
-                                style: {
-                                    display: "block",
-                                    marginBottom: 8,
-                                    fontWeight: 600,
-                                    fontSize: 14,
-                                    color: isDark ? "#ffffff" : "#374151",
-                                }
-                            }, "Backend de IA"),
-                            React.createElement("select", {
-                                key: "select",
-                                value: preferredBackend,
-                                onChange: (e) => setPreferredBackend(e.target.value),
-                                style: {
-                                    width: "100%",
-                                    padding: 12,
-                                    border: `2px solid ${isDark ? "#374151" : "#d1d5db"}`,
-                                    borderRadius: 8,
-                                    background: isDark ? "#374151" : "#ffffff",
-                                    color: isDark ? "#ffffff" : "#1f2937",
-                                    fontSize: 14,
-                                    outline: "none",
-                                }
-                            }, [
-                                React.createElement("option", { key: "auto", value: "auto" }, "Auto (Recomendado)"),
-                                React.createElement("option", { key: "llama", value: "llama" }, "Llama (Ollama Local)"),
-                                React.createElement("option", { key: "gemini", value: "gemini" }, "Gemini (Cloud)")
-                            ])
-                        ]),
+function renderLineNumbers() {
+  const lineCount = Math.max(1, activeContent().split(/\r?\n/).length);
+  return Array.from({ length: lineCount }, (_, index) => `<li>${index + 1}</li>`).join("");
+}
 
-                        React.createElement("div", { key: "strict", style: { display: "flex", alignItems: "center", gap: 12 } }, [
-                            React.createElement("label", {
-                                key: "label",
-                                style: {
-                                    fontWeight: 600,
-                                    fontSize: 14,
-                                    color: isDark ? "#ffffff" : "#374151",
-                                    cursor: "pointer",
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 8,
-                                }
-                            }, [
-                                React.createElement("input", {
-                                    key: "checkbox",
-                                    type: "checkbox",
-                                    checked: strictMode,
-                                    onChange: (e) => setStrictMode(e.target.checked),
-                                    style: {
-                                        width: 18,
-                                        height: 18,
-                                        accentColor: "#3b82f6",
-                                    }
-                                }),
-                                "Modo Estrito"
-                            ])
-                        ]),
+function qualityChecklist() {
+  const hasSpec = Boolean(state.workspace?.artifacts?.some((artifact) => artifact.kind === "spec"));
+  const hasSprint = Boolean(state.workspace?.artifacts?.some((artifact) => artifact.kind === "sprint"));
+  const contractGate = state.workspace?.contractGate;
+  const hasAgents = Boolean(state.workspace?.agents?.length);
+  const hasProgress = Boolean(state.workspace?.progress);
+  const qaPassed = state.workspace?.qaResult?.status === "passed";
+  const evaluationPassed = Boolean(state.workspace?.evaluationGate && !state.workspace.evaluationGate.doneBlocked);
+  const toolExecution = state.workspace?.toolExecution;
+  const localMemory = state.workspace?.localMemory;
+  return [
+    ["Workspace loaded", Boolean(state.workspace)],
+    ["SPEC artifacts available", hasSpec],
+    ["Sprint plans available", hasSprint],
+    ["Contract valid", Boolean(contractGate && !contractGate.buildBlocked)],
+    ["Agent state loaded", hasAgents],
+    ["Progress state loaded", hasProgress],
+    ["QA passed", qaPassed],
+    ["Evaluation score >= 90", evaluationPassed],
+    ["Tool proposals available", Boolean(toolExecution?.commands?.length)],
+    ["No failed commands", !toolExecution?.failedCommands?.length],
+    ["Sprint history indexed", Boolean(localMemory?.sprintHistoryCount)],
+    ["Local memory loaded", Boolean(state.memoryIndex)],
+    ["Editable Markdown selected", artifactIsEditable(state.artifact)],
+    ["Unsaved state tracked", isDirty()],
+  ];
+}
 
-                        React.createElement("button", {
-                            key: "submit",
-                            type: "submit",
-                            disabled: isLoading || !backendReady,
-                            style: {
-                                padding: "12px 24px",
-                                background: isLoading || !backendReady ? "#6b7280" : "#3b82f6",
-                                color: "#ffffff",
-                                border: "none",
-                                borderRadius: 8,
-                                fontSize: 16,
-                                fontWeight: 600,
-                                cursor: isLoading || !backendReady ? "not-allowed" : "pointer",
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 8,
-                                minWidth: 140,
-                                justifyContent: "center",
-                            }
-                        }, isLoading ? [
-                            React.createElement("div", {
-                                key: "spinner",
-                                style: {
-                                    width: 16,
-                                    height: 16,
-                                    border: "2px solid #ffffff",
-                                    borderTop: "2px solid transparent",
-                                    borderRadius: "50%",
-                                    animation: "spin 1s linear infinite",
-                                }
-                            }),
-                            "Processando..."
-                        ] : "Gerar Spec")
-                    ])
-                ]),
+function renderLocalMemoryPanel(localMemory, memoryIndex) {
+  const searchResults = state.memorySearchResults?.results || [];
+  const history = memoryIndex?.sprintHistory || [];
+  const decisions = memoryIndex?.documents?.filter((document) => document.type === "decision") || [];
 
-                // Backend connection status
-                React.createElement("div", {
-                    key: "backend-status",
-                    style: {
-                        marginBottom: 24,
-                        padding: 16,
-                        borderRadius: 8,
-                        background: backendReady ? "#ecfdf5" : "#fef2f2",
-                        border: `1px solid ${backendReady ? "#10b981" : "#ef4444"}`,
-                        color: backendReady ? "#065f46" : "#b91c1c",
-                    }
-                }, backendReady ? [
-                    React.createElement("strong", { key: "status-label" }, "Backend conectado:"),
-                    ` Porta ${backendPort || "desconhecida"} - tempo de atividade ${backendHealth?.uptime ? `${Math.round(backendHealth.uptime)}s` : "N/A"}`
-                ] : [
-                    React.createElement("strong", { key: "status-label" }, "Falha de conexão:"),
-                    ` ${connectionError || "Aguarde o backend iniciar e atualize a página."}`
-                ]),
+  return `
+    <div class="memory-summary">
+      <span>${localMemory?.sprintHistoryCount || history.length || 0} sprints</span>
+      <span>${localMemory?.decisionCount || decisions.length || 0} decisões</span>
+      <span>${localMemory?.documentCount || memoryIndex?.documents?.length || 0} docs</span>
+    </div>
 
-                // Error Display
-                error && React.createElement("div", {
-                    key: "error",
-                    style: {
-                        padding: 20,
-                        background: "#fef2f2",
-                        border: "2px solid #ef4444",
-                        borderRadius: 8,
-                        color: "#dc2626",
-                        marginBottom: 24,
-                        textAlign: "center",
-                    }
-                }, React.createElement("strong", null, "Erro:"), ` ${error}`),
+    <form class="memory-search" data-memory-search-form>
+      <input type="search" aria-label="Buscar memoria local" placeholder="Buscar .mcp-task/" value="${escapeHtml(state.memorySearchQuery)}">
+      <button class="secondary-action" type="submit">Buscar</button>
+    </form>
 
-                // Results Display
-                result && React.createElement("div", { key: "results" }, [
-                    React.createElement("div", {
-                        key: "result-header",
-                        style: {
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            marginBottom: 16,
-                        }
-                    }, [
-                        React.createElement("h2", {
-                            key: "title",
-                            style: {
-                                margin: 0,
-                                color: isDark ? "#ffffff" : "#1f2937",
-                                fontSize: 20,
-                                fontWeight: 600,
-                            }
-                        }, "Resposta"),
-                        React.createElement("div", { key: "badges", style: { display: "flex", gap: 12, alignItems: "center" } }, [
-                            React.createElement("span", {
-                                key: "status",
-                                style: {
-                                    padding: "4px 12px",
-                                    background: getStatusColor(result.status),
-                                    color: "#ffffff",
-                                    borderRadius: 20,
-                                    fontSize: 12,
-                                    fontWeight: 600,
-                                    textTransform: "uppercase",
-                                }
-                            }, result.status),
-                            React.createElement("span", {
-                                key: "backend",
-                                style: {
-                                    padding: "4px 12px",
-                                    background: getBackendBadgeColor(result.ai_backend?.provider || "unknown"),
-                                    color: "#ffffff",
-                                    borderRadius: 20,
-                                    fontSize: 12,
-                                    fontWeight: 600,
-                                }
-                            }, result.ai_backend?.provider || "unknown")
-                        ])
-                    ]),
+    <div class="memory-results">
+      ${searchResults.length ? searchResults.slice(0, 5).map((result) => `
+        <button type="button" data-artifact-path="${escapeHtml(result.path)}">
+          <strong>${escapeHtml(result.title)}</strong>
+          <span>${escapeHtml(result.type)} · score ${escapeHtml(result.score)}</span>
+          <small>${escapeHtml(result.excerpt)}</small>
+        </button>
+      `).join("") : `<p class="empty-state">Sem resultados de busca.</p>`}
+    </div>
 
-                    React.createElement("div", {
-                        key: "json-container",
-                        style: {
-                            background: isDark ? "#111827" : "#f8fafc",
-                            border: `2px solid ${isDark ? "#374151" : "#e2e8f0"}`,
-                            borderRadius: 8,
-                            padding: 24,
-                            marginBottom: 16,
-                            position: "relative",
-                        }
-                    }, [
-                        React.createElement("button", {
-                            key: "copy-btn",
-                            onClick: () => copyToClipboard(JSON.stringify(result, null, 2)),
-                            style: {
-                                position: "absolute",
-                                top: 12,
-                                right: 12,
-                                padding: "6px 12px",
-                                background: "#3b82f6",
-                                color: "#ffffff",
-                                border: "none",
-                                borderRadius: 6,
-                                cursor: "pointer",
-                                fontSize: 12,
-                            }
-                        }, "📋 Copiar"),
-                        React.createElement("pre", {
-                            key: "json",
-                            style: {
-                                margin: 0,
-                                fontSize: 14,
-                                lineHeight: 1.5,
-                                color: isDark ? "#e5e7eb" : "#1f2937",
-                                overflow: "auto",
-                                fontFamily: "Monaco, 'Bitstream Vera Sans Mono', 'Lucida Console', Terminal, monospace",
-                            },
-                            dangerouslySetInnerHTML: {
-                                __html: highlightJson(JSON.stringify(result, null, 2))
-                            }
-                        })
-                    ]),
+    <div class="memory-history">
+      <h3>Histórico</h3>
+      ${history.slice().reverse().slice(0, 6).map((sprint) => `
+        <article>
+          <button type="button" data-artifact-path="${escapeHtml(sprint.sprintPath)}">
+            <strong>${escapeHtml(sprint.sprintId)}</strong>
+            <span>${escapeHtml(sprint.title)}</span>
+          </button>
+          <div>
+            ${memorySprintLinks(sprint).map(([label, path]) => path ? `<button type="button" data-artifact-path="${escapeHtml(path)}">${escapeHtml(label)}</button>` : "").join("")}
+          </div>
+        </article>
+      `).join("")}
+    </div>
 
-                    // Feedback Section
-                    React.createElement("div", {
-                        key: "feedback",
-                        style: {
-                            marginBottom: 24,
-                            padding: 20,
-                            background: isDark ? "#374151" : "#f8fafc",
-                            borderRadius: 8,
-                            textAlign: "center",
-                        }
-                    }, [
-                        React.createElement("h3", {
-                            key: "feedback-title",
-                            style: {
-                                margin: "0 0 16px 0",
-                                color: isDark ? "#ffffff" : "#1f2937",
-                                fontSize: 16,
-                            }
-                        }, "Avalie esta resposta"),
-                        React.createElement("div", {
-                            key: "stars",
-                            style: { display: "flex", justifyContent: "center", gap: 8 }
-                        }, Array.from({ length: 10 }, (_, i) => i + 1).map(score =>
-                            React.createElement("button", {
-                                key: score,
-                                onClick: () => handleFeedback(score),
-                                disabled: feedbackScore !== null,
-                                style: {
-                                    padding: "8px",
-                                    background: feedbackScore === score ? "#fbbf24" : (feedbackScore ? "#6b7280" : "#3b82f6"),
-                                    color: "#ffffff",
-                                    border: "none",
-                                    borderRadius: 6,
-                                    cursor: feedbackScore ? "default" : "pointer",
-                                    fontSize: 14,
-                                    fontWeight: 600,
-                                    minWidth: 40,
-                                }
-                            }, score)
-                        )),
-                        feedbackScore && React.createElement("p", {
-                            key: "thanks",
-                            style: {
-                                margin: "16px 0 0 0",
-                                color: isDark ? "#9ca3af" : "#6b7280",
-                                fontSize: 14,
-                            }
-                        }, `Obrigado pelo feedback! Você deu nota ${feedbackScore}/10`)
-                    ]),
+    <form class="decision-form" data-decision-form>
+      <input type="text" aria-label="Titulo da decisao" placeholder="Título da decisão" value="${escapeHtml(state.decisionTitle)}">
+      <textarea aria-label="Conteudo da decisao" placeholder="Decisão e contexto">${escapeHtml(state.decisionContent)}</textarea>
+      <button class="primary-action" type="submit">Registrar decisão</button>
+    </form>
+  `;
+}
 
-                    // Performance Cards
-                    React.createElement("div", {
-                        key: "cards",
-                        style: {
-                            display: "grid",
-                            gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-                            gap: 16,
-                        }
-                    }, [
-                        React.createElement("div", {
-                            key: "backend-card",
-                            style: {
-                                padding: 16,
-                                background: isDark ? "#374151" : "#ffffff",
-                                border: `2px solid ${isDark ? "#4b5563" : "#e5e7eb"}`,
-                                borderRadius: 8,
-                            }
-                        }, [
-                            React.createElement("h3", {
-                                key: "title",
-                                style: {
-                                    margin: "0 0 8px 0",
-                                    fontSize: 14,
-                                    fontWeight: 600,
-                                    color: isDark ? "#9ca3af" : "#6b7280",
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.5,
-                                }
-                            }, "Backend de IA"),
-                            React.createElement("p", {
-                                key: "content",
-                                style: {
-                                    margin: 0,
-                                    fontSize: 16,
-                                    fontWeight: 500,
-                                    color: isDark ? "#ffffff" : "#1f2937",
-                                }
-                            }, `${result.ai_backend?.provider || 'N/A'} (${result.ai_backend?.model || 'N/A'})`),
-                            result.ai_backend?.fallback_used && React.createElement("span", {
-                                key: "fallback",
-                                style: { color: "#f59e0b", fontSize: 12 }
-                            }, "⚠️ Fallback usado")
-                        ]),
+function memorySprintLinks(sprint) {
+  return [
+    ["SPEC", sprint.specPath],
+    ["Contract", sprint.contractPath],
+    ["QA", sprint.qaPath],
+    ["Eval", sprint.evaluationPath],
+    ["Log", sprint.logPath],
+  ];
+}
 
-                        React.createElement("div", {
-                            key: "performance-card",
-                            style: {
-                                padding: 16,
-                                background: isDark ? "#374151" : "#ffffff",
-                                border: `2px solid ${isDark ? "#4b5563" : "#e5e7eb"}`,
-                                borderRadius: 8,
-                            }
-                        }, [
-                            React.createElement("h3", {
-                                key: "title",
-                                style: {
-                                    margin: "0 0 8px 0",
-                                    fontSize: 14,
-                                    fontWeight: 600,
-                                    color: isDark ? "#9ca3af" : "#6b7280",
-                                    textTransform: "uppercase",
-                                    letterSpacing: 0.5,
-                                }
-                            }, "Performance"),
-                            React.createElement("p", {
-                                key: "content",
-                                style: {
-                                    margin: 0,
-                                    fontSize: 14,
-                                    color: isDark ? "#ffffff" : "#1f2937",
-                                }
-                            }, [
-                                `Tempo: ${result.performance?.execution_time_ms || 0}ms`,
-                                React.createElement("br", { key: "br1" }),
-                                `Tokens: ${result.performance?.tokens_used || 0}`,
-                                React.createElement("br", { key: "br2" }),
-                                `Modelo: ${result.performance?.model_used || 'N/A'}`
-                            ])
-                        ])
-                    ])
-                ])
-            ]));
+function renderToolExecutionPanel(toolExecution) {
+  if (!toolExecution) {
+    return `<p class="empty-state">Nenhum estado de execucao carregado.</p>`;
+  }
 
-            // Add CSS animation
-            React.useEffect(() => {
-                const style = document.createElement('style');
-                style.textContent = `
-                    @keyframes spin {
-                        0% { transform: rotate(0deg); }
-                        100% { transform: rotate(360deg); }
-                    }
-                `;
-                document.head.appendChild(style);
-                return () => document.head.removeChild(style);
-            }, []);
-        };
+  const commands = toolExecution.commands || [];
+  const groups = [
+    ["Propostos", commands.filter((command) => command.status === "proposed")],
+    ["Aprovados", commands.filter((command) => command.status === "approved")],
+    ["Executados", commands.filter((command) => command.status === "executed")],
+    ["Falhos", commands.filter((command) => command.status === "failed")],
+  ];
 
-        ReactDOM.render(React.createElement(PromptWidget), document.getElementById('root'));
+  return `
+    <div class="execution-summary">
+      <span>${toolExecution.counts?.proposed || 0} propostos</span>
+      <span>${toolExecution.counts?.approved || 0} aprovados</span>
+      <span>${toolExecution.counts?.executed || 0} executados</span>
+      <span class="${toolExecution.failedCommands?.length ? "failed" : ""}">${toolExecution.counts?.failed || 0} falhos</span>
+    </div>
+    <div class="execution-groups">
+      ${groups.map(([label, items]) => `
+        <div class="execution-group">
+          <h3>${escapeHtml(label)}</h3>
+          ${items.length ? items.map(renderCommandProposal).join("") : `<p class="empty-state">Sem comandos.</p>`}
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderCommandProposal(command) {
+  const result = state.workspace?.toolExecution?.results?.find((item) => item.proposalId === command.id);
+  const canApprove = command.status === "proposed" && command.riskLevel !== "blocked";
+  const canExecute = command.status === "approved";
+  return `
+    <article class="execution-card ${escapeHtml(command.status)} ${escapeHtml(command.riskLevel)}">
+      <div>
+        <strong>${escapeHtml(command.label)}</strong>
+        <code>${escapeHtml([command.command, ...(command.args || [])].join(" "))}</code>
+      </div>
+      <div class="execution-meta">
+        <span>${escapeHtml(commandStatusLabel(command.status))}</span>
+        <span>${escapeHtml(command.riskLevel)}</span>
+        ${typeof result?.exitCode !== "undefined" ? `<span>exit ${escapeHtml(result.exitCode)}</span>` : ""}
+      </div>
+      <div class="execution-actions">
+        <button class="secondary-action" type="button" ${canApprove ? "" : "disabled"} data-approve-command="${escapeHtml(command.id)}">Aprovar</button>
+        <button class="primary-action" type="button" ${canExecute ? "" : "disabled"} data-execute-command="${escapeHtml(command.id)}">Executar</button>
+      </div>
+    </article>
+  `;
+}
+
+function commandStatusLabel(status) {
+  const labels = {
+    proposed: "proposto",
+    approved: "aprovado",
+    rejected: "rejeitado",
+    executed: "executado",
+    failed: "falhou",
+  };
+  return labels[status] || status;
+}
+
+function qaChecklist(qaResult) {
+  return qaResult?.items?.length
+    ? qaResult.items
+    : [{ id: "qa-missing", label: "No QA result found for current sprint.", status: "pending" }];
+}
+
+function activityEvents(progress) {
+  return progress?.events?.length
+    ? progress.events.slice(-8).reverse()
+    : [{ timestamp: new Date().toISOString(), agent: "System", message: "No local progress events found." }];
+}
+
+function shortTime(timestamp) {
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? "--:--" : date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
+
+function contractChecklist(contractGate) {
+  const fields = [
+    "sprint_id",
+    "objective",
+    "allowed_changes",
+    "forbidden_changes",
+    "acceptance_criteria",
+    "qa_checklist",
+    "expected_outputs",
+    "rollback_notes",
+  ];
+  const missing = new Set(contractGate?.missingFields || fields);
+  return fields.map((field) => [field, !missing.has(field)]);
+}
+
+function saveLabel() {
+  if (state.saveError) return state.saveError;
+  if (state.saving) return "Salvando...";
+  if (isDirty()) return "Alteracoes nao salvas";
+  if (state.saveStatus === "saved") return "Salvo";
+  return artifactIsEditable(state.artifact) ? "Pronto para editar" : "Somente leitura";
+}
+
+function saveClass() {
+  if (state.saveError) return "failed";
+  if (state.saving) return "saving";
+  if (isDirty()) return "dirty";
+  if (state.saveStatus === "saved") return "saved";
+  return "idle";
+}
+
+function authoringMessage() {
+  if (state.error) return state.error;
+  if (state.saveError) return state.saveError;
+  if (!state.artifact) return "Selecione uma SPEC ou sprint plan para editar.";
+  if (!artifactIsEditable(state.artifact)) return "Este artefato e somente leitura nesta sprint. Edicoes sao restritas a specs, sprints e contracts Markdown.";
+  if (state.artifact.path.startsWith(".mcp-task/sprints/")) {
+    return "Sprint plans precisam referenciar uma SPEC em .mcp-task/specs/ para salvar.";
+  }
+  if (state.artifact.path.startsWith(".mcp-task/contracts/")) {
+    return "Contracts precisam conter todos os campos obrigatorios para liberar Build.";
+  }
+  return "SPECs sao salvas como Markdown local dentro de .mcp-task/specs/.";
+}
+
+function bindEvents() {
+  document.querySelector("[data-refresh]")?.addEventListener("click", loadWorkspace);
+  document.querySelector("[data-save-artifact]")?.addEventListener("click", saveArtifact);
+  document.querySelector("[data-new-spec]")?.addEventListener("click", createSpecDraft);
+  document.querySelector("[data-new-sprint]")?.addEventListener("click", createSprintDraft);
+  document.querySelector("[data-new-contract]")?.addEventListener("click", createContractDraft);
+  document.querySelector("[data-generate-tool-presets]")?.addEventListener("click", generateToolPresets);
+  document.querySelector("[data-memory-search-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = event.currentTarget.querySelector("input");
+    state.memorySearchQuery = input?.value || "";
+    searchMemory();
+  });
+  document.querySelector("[data-decision-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const inputs = event.currentTarget.querySelectorAll("input, textarea");
+    state.decisionTitle = inputs[0]?.value || "";
+    state.decisionContent = inputs[1]?.value || "";
+    saveDecisionNote();
+  });
+  document.querySelector("[data-build-gate]")?.addEventListener("click", () => {
+    state.saveError = state.workspace?.contractGate?.buildBlocked
+      ? state.workspace.contractGate.message
+      : "Build gate liberado pelo Contract valido.";
+    renderShell();
+  });
+  document.querySelector("[data-done-gate]")?.addEventListener("click", () => {
+    state.saveError = state.workspace?.evaluationGate?.doneBlocked
+      ? state.workspace.evaluationGate.message
+      : "Done gate liberado por QA e Evaluation validos.";
+    renderShell();
+  });
+
+  document.querySelector(".markdown-editor")?.addEventListener("input", (event) => {
+    state.editorContent = event.target.value;
+    state.saveError = null;
+    renderShell();
+    const textarea = document.querySelector(".markdown-editor");
+    textarea?.focus();
+    textarea?.setSelectionRange(event.target.selectionStart, event.target.selectionEnd);
+  });
+
+  document.querySelectorAll("[data-tool]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedTool = button.dataset.tool;
+      renderShell();
+    });
+  });
+
+  document.querySelectorAll("[data-artifact-path]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const artifactPath = button.dataset.artifactPath;
+      if (artifactPath) loadArtifact(artifactPath);
+    });
+  });
+
+  document.querySelectorAll("[data-approve-command]").forEach((button) => {
+    button.addEventListener("click", () => approveCommand(button.dataset.approveCommand));
+  });
+
+  document.querySelectorAll("[data-execute-command]").forEach((button) => {
+    button.addEventListener("click", () => executeCommand(button.dataset.executeCommand));
+  });
+}
+
+async function loadWorkspace() {
+  state.loading = true;
+  state.error = null;
+  state.workspace = null;
+  state.artifact = null;
+  state.editorContent = "";
+  state.savedContent = "";
+  state.saveError = null;
+  renderShell();
+
+  try {
+    const response = await fetch(`${state.backendBaseUrl}/workspace`, { cache: "no-store" });
+    if (!response.ok) {
+      const body = await safeJson(response);
+      throw new Error(body.message || `Workspace request failed: ${response.status}`);
+    }
+
+    state.workspace = await response.json();
+    state.activeArtifactPath = pickInitialArtifactPath(state.workspace);
+    state.loading = false;
+    renderShell();
+
+    await loadMemoryIndex();
+    if (state.activeArtifactPath) await loadArtifact(state.activeArtifactPath);
+  } catch (error) {
+    state.loading = false;
+    state.error = error instanceof Error ? error.message : "Failed to load local workspace.";
+    renderShell();
+  }
+}
+
+async function loadArtifact(artifactPath) {
+  state.activeArtifactPath = artifactPath;
+  state.artifactLoading = true;
+  state.artifact = null;
+  state.saveError = null;
+  renderShell();
+
+  try {
+    const response = await fetch(`${state.backendBaseUrl}/workspace/artifact?path=${encodeURIComponent(artifactPath)}`, { cache: "no-store" });
+    if (!response.ok) {
+      const body = await safeJson(response);
+      throw new Error(body.message || `Artifact request failed: ${response.status}`);
+    }
+
+    state.artifact = await response.json();
+    state.editorContent = state.artifact.content;
+    state.savedContent = state.artifact.content;
+    state.saveStatus = "idle";
+  } catch (error) {
+    const content = `# Artifact unavailable\n\n${error instanceof Error ? error.message : "Failed to load artifact."}`;
+    state.artifact = { path: artifactPath, title: "artifact-error.md", content };
+    state.editorContent = content;
+    state.savedContent = content;
+  } finally {
+    state.artifactLoading = false;
+    renderShell();
+  }
+}
+
+async function saveArtifact() {
+  if (!state.artifact || !artifactIsEditable(state.artifact)) return;
+
+  state.saving = true;
+  state.saveError = null;
+  renderShell();
+
+  try {
+    const payload = {
+      path: state.artifact.path,
+      content: state.editorContent,
+      specPath: state.artifact.path.startsWith(".mcp-task/sprints/") ? findReferencedSpecPath() : undefined,
+    };
+    const response = await fetch(`${state.backendBaseUrl}/workspace/artifact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const body = await safeJson(response);
+      const missingFields = Array.isArray(body.details?.missingFields) ? ` Missing: ${body.details.missingFields.join(", ")}` : "";
+      throw new Error(`${body.message || `Save failed: ${response.status}`}${missingFields}`);
+    }
+
+    const saved = await response.json();
+    state.artifact = saved;
+    state.editorContent = saved.content;
+    state.savedContent = saved.content;
+    state.saveStatus = "saved";
+    await refreshWorkspaceAfterSave(saved.path);
+  } catch (error) {
+    state.saveError = error instanceof Error ? error.message : "Failed to save artifact.";
+    state.saveStatus = "failed";
+  } finally {
+    state.saving = false;
+    renderShell();
+  }
+}
+
+async function refreshWorkspaceAfterSave(activePath) {
+  const response = await fetch(`${state.backendBaseUrl}/workspace`, { cache: "no-store" });
+  if (response.ok) state.workspace = await response.json();
+  await loadMemoryIndex();
+  state.activeArtifactPath = activePath;
+}
+
+async function loadMemoryIndex() {
+  try {
+    const response = await fetch(`${state.backendBaseUrl}/workspace/memory`, { cache: "no-store" });
+    if (response.ok) {
+      state.memoryIndex = await response.json();
+    }
+  } catch {
+    state.memoryIndex = null;
+  }
+}
+
+async function searchMemory() {
+  try {
+    const response = await fetch(`${state.backendBaseUrl}/workspace/memory/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: state.memorySearchQuery, limit: 8 }),
+    });
+
+    if (!response.ok) {
+      const body = await safeJson(response);
+      throw new Error(body.message || `Memory search failed: ${response.status}`);
+    }
+
+    state.memorySearchResults = await response.json();
+  } catch (error) {
+    state.saveError = error instanceof Error ? error.message : "Memory search failed.";
+  } finally {
+    renderShell();
+  }
+}
+
+async function saveDecisionNote() {
+  try {
+    const response = await fetch(`${state.backendBaseUrl}/workspace/memory/decisions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: state.decisionTitle,
+        content: state.decisionContent,
+        tags: ["decision", "local-memory"],
+        relatedSprintId: state.workspace?.currentSprint,
+        relatedArtifactPaths: state.activeArtifactPath ? [state.activeArtifactPath] : [],
+      }),
+    });
+
+    if (!response.ok) {
+      const body = await safeJson(response);
+      throw new Error(body.message || `Decision save failed: ${response.status}`);
+    }
+
+    const saved = await response.json();
+    state.decisionTitle = "";
+    state.decisionContent = "";
+    state.saveStatus = "saved";
+    state.saveError = `Decision saved: ${saved.path}`;
+    await refreshWorkspaceAfterSave(state.activeArtifactPath);
+  } catch (error) {
+    state.saveError = error instanceof Error ? error.message : "Decision save failed.";
+  } finally {
+    renderShell();
+  }
+}
+
+async function generateToolPresets() {
+  await postToolHarness("/workspace/tool-harness/proposals/package-scripts", {});
+}
+
+async function approveCommand(proposalId) {
+  if (!proposalId) return;
+  await postToolHarness("/workspace/tool-harness/commands/approve", { proposalId });
+}
+
+async function executeCommand(proposalId) {
+  if (!proposalId) return;
+  await postToolHarness("/workspace/tool-harness/commands/execute", { proposalId });
+}
+
+async function postToolHarness(path, payload) {
+  state.saveError = null;
+  renderShell();
+
+  try {
+    const response = await fetch(`${state.backendBaseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const body = await safeJson(response);
+      throw new Error(body.message || `Tool harness request failed: ${response.status}`);
+    }
+
+    const toolExecution = await response.json();
+    if (state.workspace) {
+      state.workspace.toolExecution = toolExecution;
+    }
+    await refreshWorkspaceAfterSave(state.activeArtifactPath);
+  } catch (error) {
+    state.saveError = error instanceof Error ? error.message : "Tool harness request failed.";
+  } finally {
+    renderShell();
+  }
+}
+
+function createSpecDraft() {
+  const date = new Date().toISOString().slice(0, 10);
+  const path = `.mcp-task/specs/spec-${date}.md`;
+  const content = `# SPEC - ${date}\n\n## Goal\n\nDescribe the product change.\n\n## Scope\n\n- \n\n## Requirements\n\n- \n\n## Acceptance Criteria\n\n- \n`;
+  setDraftArtifact(path, "spec", "Spec Draft", content);
+}
+
+function createSprintDraft() {
+  const specPath = findFirstSpecPath();
+  const content = `# Sprint SPRINT-NEW - Sprint Plan\n\n## Linked SPEC\n\n${specPath || "Select or create a SPEC first."}\n\n## Goal\n\nDescribe the sprint goal.\n\n## Status\n\n\`planned\`\n\n## Scope\n\n- \n\n## Tasks\n\n- [ ] \n\n## Acceptance Criteria\n\n- \n`;
+  setDraftArtifact(".mcp-task/sprints/sprint-new-plan.md", "sprint", "Sprint New Plan", content);
+}
+
+function createContractDraft() {
+  const sprintId = state.workspace?.currentSprint || "SPRINT-006";
+  const sprintSlug = sprintId.toLowerCase();
+  const path = `.mcp-task/contracts/${sprintSlug}-explicit-tool-execution.md`;
+  const content = `# Contract - ${sprintId} Explicit Tool Execution Harness\n\n## sprint_id\n\n\`${sprintId}\`\n\n## objective\n\nPropose, approve, execute and audit local validation commands explicitly.\n\n## allowed_changes\n\n- Add command proposal and execution state.\n- Add user approval before execution.\n- Add local execution logs.\n- Surface failed commands in QA/Evaluation.\n\n## forbidden_changes\n\n- Do not execute commands automatically.\n- Do not approve blocked commands.\n- Do not add SaaS or database persistence.\n\n## acceptance_criteria\n\n- Commands require approval before execution.\n- Blocked commands cannot execute.\n- Logs include timestamp and exit status.\n\n## qa_checklist\n\n- [ ] Validate proposal schema.\n- [ ] Validate approval gate.\n- [ ] Validate failed command surfacing.\n\n## expected_outputs\n\n- Tool execution state.\n- IDE shell execution panel.\n- Golden tests.\n\n## rollback_notes\n\nRemove execution harness routes, state and UI panel.\n`;
+  setDraftArtifact(path, "contract", "Contract Draft", content);
+}
+
+function setDraftArtifact(path, kind, title, content) {
+  state.activeArtifactPath = path;
+  state.artifact = { path, kind, title, content };
+  state.editorContent = content;
+  state.savedContent = "";
+  state.saveStatus = "idle";
+  state.saveError = null;
+  renderShell();
+}
+
+function findFirstSpecPath() {
+  return state.workspace?.artifacts?.find((artifact) => artifact.kind === "spec")?.path || "";
+}
+
+function findReferencedSpecPath() {
+  const specs = state.workspace?.artifacts?.filter((artifact) => artifact.kind === "spec") || [];
+  return specs.find((artifact) => state.editorContent.includes(artifact.path))?.path || specs[0]?.path || "";
+}
+
+function pickInitialArtifactPath(workspace) {
+  if (!workspace?.artifacts?.length) return null;
+  return (
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/specs/sprint-003-spec-authoring.md")?.path ||
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/specs/sprint-004-contract-gatekeeping.md")?.path ||
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/specs/sprint-005-agent-progress-engine.md")?.path ||
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/specs/sprint-006-qa-evaluation-engine.md")?.path ||
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/specs/sprint-007-explicit-tool-execution.md")?.path ||
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/specs/sprint-008-local-memory-history.md")?.path ||
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/tools/sprint-007-tool-execution.json")?.path ||
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/qa/sprint-006-qa.json")?.path ||
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/progress/sprint-005.json")?.path ||
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/contracts/sprint-004-contract-gatekeeping.md")?.path ||
+    workspace.artifacts.find((artifact) => artifact.path === ".mcp-task/sprints/sprint-003-spec-sprint-authoring.md")?.path ||
+    workspace.roadmapPath ||
+    workspace.artifacts[0].path
+  );
+}
+
+async function safeJson(response) {
+  try {
+    return await response.json();
+  } catch {
+    return {};
+  }
+}
+
+loadWorkspace();

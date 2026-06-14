@@ -1,0 +1,87 @@
+{
+  "sprintId": "SPRINT-008",
+  "stage": "Evaluation",
+  "status": "passed",
+  "updatedAt": "2026-06-14T02:45:00.000Z",
+  "agents": [
+    {
+      "name": "Planner",
+      "role": "Planner",
+      "goal": "Keep local memory scope aligned with SPEC and roadmap.",
+      "allowed_actions": ["read_specs", "update_sprint_plan", "record_planning_events"],
+      "forbidden_actions": ["implement_production_code"],
+      "inputs": ["roadmap", "SPEC"],
+      "outputs": ["sprint_plan", "planning_events"],
+      "status": "complete"
+    },
+    {
+      "name": "Contract",
+      "role": "Contract",
+      "goal": "Define local-only memory and history boundaries.",
+      "allowed_actions": ["create_contract", "validate_contract_fields"],
+      "forbidden_actions": ["execute_build", "mark_done"],
+      "inputs": ["SPEC", "sprint_plan"],
+      "outputs": ["contract", "contract_gate"],
+      "status": "complete"
+    },
+    {
+      "name": "Builder",
+      "role": "Builder",
+      "goal": "Implement only the approved local memory Contract scope.",
+      "allowed_actions": ["edit_allowed_files", "record_build_events"],
+      "forbidden_actions": ["self_validate_completion", "expand_scope"],
+      "inputs": ["contract"],
+      "outputs": ["implementation", "build_events"],
+      "status": "complete"
+    },
+    {
+      "name": "QA",
+      "role": "QA",
+      "goal": "Validate local memory index, search and decision notes.",
+      "allowed_actions": ["run_validation", "record_failures", "record_passes"],
+      "forbidden_actions": ["expand_scope", "skip_contract_items"],
+      "inputs": ["contract", "implementation"],
+      "outputs": ["qa_result"],
+      "status": "complete"
+    },
+    {
+      "name": "Evaluator",
+      "role": "Evaluator",
+      "goal": "Score sprint result only after QA.",
+      "allowed_actions": ["score_sprint", "record_evaluation"],
+      "forbidden_actions": ["skip_qa", "override_failed_contract"],
+      "inputs": ["qa_result", "validation_results"],
+      "outputs": ["evaluation"],
+      "status": "complete"
+    }
+  ],
+  "events": [
+    {
+      "id": "evt-sprint-008-001",
+      "sprintId": "SPRINT-008",
+      "agent": "Contract",
+      "type": "completed",
+      "message": "Local memory Contract created with file-backed boundaries.",
+      "timestamp": "2026-06-14T02:30:00.000Z",
+      "artifactPath": ".mcp-task/contracts/sprint-008-local-memory-history.md"
+    },
+    {
+      "id": "evt-sprint-008-002",
+      "sprintId": "SPRINT-008",
+      "agent": "QA",
+      "type": "validated",
+      "message": "QA checklist passed for local memory and history.",
+      "timestamp": "2026-06-14T02:45:00.000Z",
+      "artifactPath": ".mcp-task/qa/sprint-008-qa.json"
+    },
+    {
+      "id": "evt-sprint-008-003",
+      "sprintId": "SPRINT-008",
+      "agent": "Evaluator",
+      "type": "completed",
+      "message": "Evaluation score 94 recorded.",
+      "timestamp": "2026-06-14T02:45:30.000Z",
+      "artifactPath": ".mcp-task/evaluations/sprint-008-evaluation.json"
+    }
+  ]
+}

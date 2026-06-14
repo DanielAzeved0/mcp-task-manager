@@ -1,0 +1,44 @@
+{
+  "sprintId": "SPRINT-010",
+  "contractPath": ".mcp-task/contracts/sprint-010-mvp-hardening.md",
+  "status": "passed",
+  "validatedAt": "2026-06-14T03:30:00.000Z",
+  "items": [
+    {
+      "id": "qa-001",
+      "label": "Readiness report schema is validated.",
+      "status": "passed",
+      "evidence": "Golden tests validate a ready report and reject invalid ready states."
+    },
+    {
+      "id": "qa-002",
+      "label": "Score below 90 blocks ready.",
+      "status": "passed",
+      "evidence": "Golden tests reject ready report with score 89."
+    },
+    {
+      "id": "qa-003",
+      "label": "Failed required checks block ready.",
+      "status": "passed",
+      "evidence": "Golden tests reject ready report with a failed required workspace check."
+    },
+    {
+      "id": "qa-004",
+      "label": "README contains MVP operational sections.",
+      "status": "passed",
+      "evidence": "Golden tests validate required README sections for CLI, MVP local, limitations and validation."
+    },
+    {
+      "id": "qa-005",
+      "label": "Local CLI commands passed.",
+      "status": "passed",
+      "evidence": "Built CLI status, doctor and --help executed successfully."
+    },
+    {
+      "id": "qa-006",
+      "label": "Local validation commands passed.",
+      "status": "passed",
+      "evidence": "node --check public/app.js, npm.cmd run build and npm.cmd run test:golden passed."
+    }
+  ]
+}

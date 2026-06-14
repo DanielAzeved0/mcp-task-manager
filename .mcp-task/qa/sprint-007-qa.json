@@ -1,0 +1,56 @@
+{
+  "sprintId": "SPRINT-007",
+  "contractPath": ".mcp-task/contracts/sprint-007-explicit-tool-execution.md",
+  "status": "passed",
+  "validatedAt": "2026-06-14T02:20:00.000Z",
+  "items": [
+    {
+      "id": "qa-001",
+      "label": "Command proposal schema is validated.",
+      "status": "passed",
+      "evidence": "Golden tests validate valid proposals and reject blocked approved commands."
+    },
+    {
+      "id": "qa-002",
+      "label": "MCP tool call and result schemas are validated.",
+      "status": "passed",
+      "evidence": "Golden tests validate registered tool calls, unknown tool rejection and failed tool results."
+    },
+    {
+      "id": "qa-003",
+      "label": "Package scripts generate validation presets.",
+      "status": "passed",
+      "evidence": "Golden tests validate build and test:golden presets from package scripts."
+    },
+    {
+      "id": "qa-004",
+      "label": "Approval is required before execution.",
+      "status": "passed",
+      "evidence": "Golden tests reject execution result recording for proposed commands."
+    },
+    {
+      "id": "qa-005",
+      "label": "Blocked commands cannot be approved.",
+      "status": "passed",
+      "evidence": "Golden tests reject blocked command approval and destructive script bodies."
+    },
+    {
+      "id": "qa-006",
+      "label": "Failed commands are surfaced.",
+      "status": "passed",
+      "evidence": "Golden tests validate failed command counts and failedCommands summary."
+    },
+    {
+      "id": "qa-007",
+      "label": "UI separates execution states.",
+      "status": "passed",
+      "evidence": "Execution harness panel groups proposed, approved, executed and failed commands."
+    },
+    {
+      "id": "qa-008",
+      "label": "Local validation commands passed.",
+      "status": "passed",
+      "evidence": "node --check public/app.js, npm.cmd run build and npm.cmd run test:golden passed."
+    }
+  ]
+}

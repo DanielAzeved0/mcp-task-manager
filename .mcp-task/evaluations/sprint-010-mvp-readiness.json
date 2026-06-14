@@ -1,0 +1,82 @@
+{
+  "sprintId": "SPRINT-010",
+  "status": "ready",
+  "score": 94,
+  "generatedAt": "2026-06-14T03:25:00.000Z",
+  "checks": [
+    {
+      "id": "workspace-readable",
+      "category": "workspace",
+      "label": "Workspace is readable",
+      "status": "passed",
+      "evidence": ".mcp-task/ artifacts are loaded by workspace summary and CLI status.",
+      "required": true
+    },
+    {
+      "id": "pipeline-gates",
+      "category": "pipeline",
+      "label": "Pipeline gates exist",
+      "status": "passed",
+      "evidence": "Contract, QA and Evaluation gates exist through local artifacts.",
+      "required": true
+    },
+    {
+      "id": "cli-local",
+      "category": "cli",
+      "label": "CLI local commands work",
+      "status": "passed",
+      "evidence": "Built CLI status, doctor and --help commands pass after build.",
+      "required": true
+    },
+    {
+      "id": "validation-suite",
+      "category": "validation",
+      "label": "Validation suite passes",
+      "status": "passed",
+      "evidence": "node --check, npm build and golden tests pass.",
+      "required": true
+    },
+    {
+      "id": "documentation-current",
+      "category": "documentation",
+      "label": "Documentation reflects MVP",
+      "status": "passed",
+      "evidence": "README includes CLI Local, MVP Local, Limitações do MVP and Validação Local.",
+      "required": true
+    },
+    {
+      "id": "offline-file-backed",
+      "category": "offline",
+      "label": "Offline file-backed behavior preserved",
+      "status": "passed",
+      "evidence": "No database, cloud sync or remote memory was introduced.",
+      "required": true
+    },
+    {
+      "id": "visual-browser-smoke",
+      "category": "ui",
+      "label": "Browser visual smoke",
+      "status": "warning",
+      "evidence": "Static UI has responsive CSS, but no automated browser screenshot test exists.",
+      "required": false
+    }
+  ],
+  "risks": [
+    {
+      "id": "large-local-index",
+      "severity": "medium",
+      "description": ".mcp-task/ indexing may slow down if artifact history becomes large.",
+      "mitigation": "Add pagination or bounded indexing before broad public use."
+    },
+    {
+      "id": "manual-visual-qa",
+      "severity": "low",
+      "description": "Responsive UI currently relies on CSS and manual inspection.",
+      "mitigation": "Add browser smoke screenshots in a future dedicated testing sprint."
+    }
+  ],
+  "nextActions": [
+    "Keep future release work behind an explicit publishing contract.",
+    "Avoid SaaS/cloud scope until the local MVP has sustained usage."
+  ]
+}

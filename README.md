@@ -1,4 +1,6 @@
-# MCP Prompt Generator
+# MCP Harness Task Manager
+
+Nome curto do pacote local: `mcp-task`.
 
 Aplicacao fullstack local que converte prompts, codigo, JSON ou contexto em SPECs estruturadas, usando um runtime semantico governado com Gemini, Llama/Ollama, validacao rigida de schema, injecao de contexto de codigo e fallback deterministico.
 
@@ -353,6 +355,141 @@ Por padrao:
 
 O backend escreve `public/backend-config.json` para o frontend descobrir a porta ativa.
 
+## Como Rodar com Docker
+
+O container de producao sobe a API e a UI estatica no mesmo processo Express.
+
+Build manual:
+
+```bash
+docker build -t mcp-task .
+```
+
+Run manual:
+
+```bash
+docker run --rm -p 3000:3000 --name mcp-task mcp-task
+```
+
+Com Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+Se a porta `3000` ja estiver ocupada:
+
+```bash
+HOST_PORT=3010 docker compose up --build
+```
+
+No PowerShell:
+
+```powershell
+$env:HOST_PORT="3010"; docker compose up --build
+```
+
+Depois acesse:
+
+- app: `http://localhost:3000`
+- health: `http://localhost:3000/health`
+- endpoint principal: `POST http://localhost:3000/prompt-to-spec`
+
+Se voce usou `HOST_PORT=3010`, troque `3000` por `3010` nas URLs acima.
+
+O `docker-compose.yml` monta estes arquivos locais dentro do container para preservar o comportamento offline-first:
+
+```text
+./.mcp-task -> /app/.mcp-task
+./promptSpecHistory.json -> /app/promptSpecHistory.json
+```
+
+Variaveis de ambiente podem ser passadas pelo shell antes de iniciar o Compose:
+
+```bash
+PREFERRED_BACKEND=deterministic_builder docker compose up --build
+```
+
+Para usar Gemini, defina `GEMINI_API_KEY` fora do repositorio. Para usar Ollama instalado no host, use `USE_OLLAMA=true` e mantenha `OLLAMA_HOST=http://host.docker.internal:11434`.
+
+## CLI Local
+
+Depois do build, a CLI local fica disponivel em `dist/cli/mcp-task.js` e o pacote expoe o binario `mcp-task` para uso local futuro.
+
+Comandos suportados:
+
+```bash
+npm run build
+node dist/cli/mcp-task.js status
+node dist/cli/mcp-task.js doctor
+node dist/cli/mcp-task.js --help
+```
+
+`status` le `.mcp-task/` diretamente e mostra sprint atual, Contract, QA, Evaluation, Done gate, memoria local e comandos de ferramenta. Ele nao precisa do servidor HTTP.
+
+`doctor` valida pre-condicoes locais: runtime Node, `package.json`, metadata do pacote, scripts essenciais, `.mcp-task/` e roadmap.
+
+`start` reaproveita o servidor local existente:
+
+```bash
+node dist/cli/mcp-task.js start
+```
+
+Esta sprint prepara estrutura local de pacote. Nao ha publicacao npm, release automation, cloud sync ou instalador desktop.
+
+## MVP Local
+
+O MVP local do MCP Harness Task Manager usa arquivos em `.mcp-task/` como fonte operacional. O fluxo principal suportado e:
+
+```text
+SPEC -> Contract -> Build -> QA -> Evaluation -> Done
+```
+
+Capacidades prontas no MVP:
+
+- shell visual estilo IDE para navegar artefatos locais;
+- leitura e edicao controlada de SPECs, sprint plans e Contracts;
+- gate de Contract antes de Build;
+- QA e Evaluation com score minimo para liberar Done;
+- execution harness com comandos propostos, aprovados e auditados;
+- memoria local e historico pesquisavel em Markdown/JSON;
+- CLI local `mcp-task` para `status`, `doctor`, `help` e `start`;
+- persistencia offline-first baseada em `.mcp-task/`.
+
+## Limitações do MVP
+
+O MVP nao inclui:
+
+- SaaS, usuarios, times, billing ou cloud sync;
+- banco de dados, vector database ou embeddings;
+- publicacao npm real;
+- instalador desktop;
+- execucao automatica de comandos;
+- colaboracao em tempo real;
+- sandbox avancado de sistema operacional.
+
+Essas ausencias sao deliberadas para manter o produto local, barato e auditavel.
+
+## Validação Local
+
+Antes de considerar o MVP saudavel, rode:
+
+```bash
+node --check public/app.js
+npm run build
+npm run test:golden
+node dist/cli/mcp-task.js status
+node dist/cli/mcp-task.js doctor
+node dist/cli/mcp-task.js --help
+```
+
+O readiness report do MVP fica em:
+
+```text
+.mcp-task/evaluations/sprint-010-mvp-readiness.json
+.mcp-task/docs/mvp-readiness.md
+```
+
 ## Scripts Disponiveis
 
 Scripts reais do `package.json`:
@@ -366,6 +503,7 @@ npm run dev              # alias para fullstack
 npm run build            # compila TypeScript com tsc
 npm run test:golden      # build + suite golden
 npm start                # executa dist/index.js
+npm run cli              # executa dist/cli/mcp-task.js apos build
 ```
 
 ## Variaveis de Ambiente

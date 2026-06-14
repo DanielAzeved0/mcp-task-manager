@@ -1,0 +1,18 @@
+{
+  "sprintId": "SPRINT-006",
+  "status": "passed",
+  "score": 94,
+  "checks": {
+    "contractCompliance": true,
+    "architecture": true,
+    "simplicity": true,
+    "offlineSupport": true,
+    "uiConsistency": true,
+    "validation": true
+  },
+  "failures": [],
+  "recommendations": [
+    "In Sprint 7, connect QA/Evaluation outcomes to explicit user-approved tool execution.",
+    "Keep automatic Done blocked unless QA result and Evaluation remain present and valid."
+  ]
+}

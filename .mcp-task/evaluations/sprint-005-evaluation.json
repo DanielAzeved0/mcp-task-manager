@@ -1,0 +1,18 @@
+{
+  "sprintId": "SPRINT-005",
+  "status": "passed",
+  "score": 94,
+  "checks": {
+    "contractCompliance": true,
+    "architecture": true,
+    "simplicity": true,
+    "offlineSupport": true,
+    "uiConsistency": true,
+    "validation": true
+  },
+  "failures": [],
+  "recommendations": [
+    "In Sprint 6, use the recorded agent/progress state as input for QA and Evaluation gating.",
+    "Keep event recording explicit and local until Sprint 7 introduces user-approved tool execution."
+  ]
+}
