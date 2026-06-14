@@ -2,216 +2,146 @@
 
 Nome curto do pacote local: `mcp-task`.
 
-Aplicacao fullstack local que converte prompts, codigo, JSON ou contexto em SPECs estruturadas, usando um runtime semantico governado com Gemini, Llama/Ollama, validacao rigida de schema, injecao de contexto de codigo e fallback deterministico.
+Aplicacao local, offline-first, para gerenciar desenvolvimento assistido por IA em sprints auditaveis. O produto combina um gerador governado de SPECs com um shell visual estilo IDE para operar o fluxo:
 
-Este README e a fonte unica de documentacao do projeto. Documentos antigos de setup, exemplos, summaries e ADRs foram consolidados aqui para evitar informacao duplicada ou desatualizada.
-
-## Visao Geral
-
-O MCP Prompt Generator nao e um chatbot aberto. Ele funciona como um compilador de SPECs: recebe uma solicitacao em linguagem natural, classifica a intent, seleciona um template, coleta contexto de codigo quando disponivel e produz uma estrutura `PromptSpecResponse` validada.
-
-Principio central:
-
-> A estrutura da SPEC pertence ao sistema. A LLM apenas preenche conteudo dentro de campos permitidos.
-
-O runtime atual inclui:
-
-- classificacao semantica e hierarquica de intents;
-- priorizacao entre `code_refactor`, `code_analysis`, `api_design`, `frontend_component`, `security_analysis` e outras intents;
-- runtime input gate antes da chamada de LLM;
-- hidratacao pre-gate com codigo inline colado no prompt;
-- extracao de snippets markdown, TypeScript, JavaScript e JSON;
-- injecao de contexto real do workspace quando arquivos relevantes existem;
-- prompt compiler consciente de schema;
-- guardas contra override estrutural da LLM;
-- pipeline de JSON estrito;
-- governanca de providers e fallback deterministico;
-- suite golden de regressao.
-
-## Principais Funcionalidades
-
-- **Campo unico de entrada**: o usuario cola prompt, codigo, JSON ou contexto no mesmo textarea.
-- **Classificacao semantica**: detecta dominio, tarefa, risco e intent final.
-- **Intent prioritization**: verbos como analisar, refatorar, revisar e proteger influenciam a resolucao entre intents proximas.
-- **Confidence gap handling**: quando duas intents ficam proximas, o runtime aplica uma resolucao segura.
-- **Runtime Input Gate**: bloqueia com `422` quando uma intent exige dados obrigatorios e eles nao existem.
-- **Inline Code Pre-Gate Hydration**: extrai codigo do prompt antes do gate e preenche `inputs.code`.
-- **Inline Code Extraction**: cria arquivos virtuais como `inline_prompt_1.ts` ou `inline_prompt_1.json`.
-- **Code Context Injection**: seleciona arquivos do workspace, dependencias e snippets inline para montar `CODE_CONTEXT`.
-- **Input Field Inference Guard**: impede que stopwords como `esse`, `para` e `quero` criem campos tecnicos indevidos.
-- **Schema-Aware Prompt Compiler**: injeta contrato tipado, exemplo valido e regras negativas no prompt da LLM.
-- **Strict Contract Enforcement**: a LLM deve retornar somente `{ "content": { ... } }`.
-- **JSON Stability Engine**: remove fences markdown, extrai JSON, tenta reparos permitidos e classifica erros.
-- **Schema Authority Guard**: rejeita chaves proibidas como `schema`, `intent`, `template`, `prompt_spec` e `metadata`.
-- **Provider governance**: separa erros de modelo, quota, auth, timeout e resposta malformada.
-- **Model failover**: troca modelos Gemini quando um modelo configurado esta indisponivel.
-- **Fallback deterministico**: usa template seguro por intent quando providers falham.
-- **Golden tests**: validam classificacao, fallback, runtime gate, JSON, schema e contexto inline.
-
-## Fluxo de Arquitetura
-
-```mermaid
-flowchart TD
-  A["Interface Web: campo unico"] --> B["POST /prompt-to-spec"]
-  B --> C["Semantic Classifier"]
-  C --> D["Intent Prioritization Matrix"]
-  D --> E["Inline Code Pre-Gate Hydration"]
-  E --> F["Runtime Input Gate"]
-  F -->|inputs validos| G["Template Registry / Composition"]
-  F -->|missing_required_input| X["422 deterministic error"]
-  G --> H["Code Context Resolver"]
-  H --> I["Dependency Scanner"]
-  I --> J["Code Pack Builder"]
-  J --> K["Schema-Aware Prompt Compiler"]
-  K --> L["Backend Router + Provider Governance"]
-  L --> M["Gemini / Llama-Ollama"]
-  L --> N["Deterministic Builder"]
-  M --> O["JSON Stability Engine"]
-  O --> P["Schema Authority Guard"]
-  P --> Q["Normalizer + Semantic Governance"]
-  Q --> R["Quality and Confidence Engines"]
-  N --> R
-  R --> S["PromptSpecResponse"]
+```text
+SPEC -> Contract -> Build -> QA -> Evaluation -> Done
 ```
 
-## Fluxo de Execucao
+O objetivo atual nao e ser um SaaS nem um chatbot aberto. O app funciona como um harness local para manter SPECs, contratos, progresso, QA, avaliacoes, memoria e comandos de validacao em arquivos dentro de `.mcp-task/`.
 
-1. O usuario informa tudo no campo unico: pedido, codigo, JSON ou contexto.
-2. O frontend envia esse conteudo como `prompt`.
-3. O backend normaliza a request e inicia tracing/logs estruturados.
-4. O classificador detecta dominio, verbo, risco e intent semantica.
-5. Se a intent exigir codigo, o pre-gate tenta extrair codigo inline do proprio prompt.
-6. O runtime gate bloqueia apenas quando nao ha campo explicito nem codigo inline suficiente.
-7. O sistema seleciona o template da SPEC e preserva campos definidos pelo template.
-8. O code context resolver procura arquivos reais relacionados e mescla snippets inline.
-9. O code pack builder monta um `CODE_CONTEXT` compacto com limite de tokens.
-10. O schema-aware prompt compiler gera um prompt content-only com contrato tipado.
-11. Gemini ou Llama/Ollama recebe apenas instrucao para preencher conteudo.
-12. A resposta da LLM passa pelo JSON stability engine.
-13. O schema authority guard impede override estrutural.
-14. O sistema injeta o conteudo no schema controlado pelo template.
-15. A SPEC e normalizada, validada e pontuada.
-16. Se um provider falhar, o fallback deterministico usa template seguro por intent.
-17. A API retorna `PromptSpecResponse` com backend, fallback, qualidade, validacao e metadados.
+## Status Atual
+
+Status: MVP local funcional e dockerizado.
+
+Roadmap atual:
+
+```text
+SPRINT-001 - IDE Shell Foundation - passed
+SPRINT-002 - File-Backed Workspace Runtime - passed
+SPRINT-003 - SPEC and Sprint Authoring Flow - passed
+SPRINT-004 - Contract Builder and Gatekeeping - passed
+SPRINT-005 - Agent Activity and Progress Engine - passed
+SPRINT-006 - QA and Evaluation Engine - passed
+SPRINT-007 - Explicit Tool Execution Harness - passed
+SPRINT-008 - Local Memory and History - passed
+SPRINT-009 - Packaging and CLI Foundation - passed
+SPRINT-010 - MVP Hardening - passed
+SPRINT-011 - Docker Runtime - passed
+```
+
+Readiness mais recente:
+
+- SPRINT-010 MVP readiness: `ready`, score `94`.
+- SPRINT-011 Docker Runtime: `passed`, score `94`.
+- Container Docker validado com `HOST_PORT=3010` quando a porta `3000` estava ocupada.
+
+## Capacidades Atuais
+
+- Shell visual estilo IDE em `public/`.
+- API Express local em `src/`.
+- Workspace file-backed em `.mcp-task/`.
+- Leitura e edicao controlada de SPECs, sprint plans e Contracts Markdown.
+- Gate de Contract antes de Build.
+- Gate de QA e Evaluation antes de Done.
+- Registro de agentes, progresso, logs e eventos locais.
+- Memoria local pesquisavel em arquivos Markdown/JSON.
+- Harness de ferramentas com comandos propostos, aprovados e executados explicitamente.
+- CLI local `mcp-task` para `status`, `doctor`, `start`, `--help` e `--version`.
+- Runtime Docker com API e UI estatica no mesmo container.
+- Runtime original de prompt-to-spec preservado em `POST /prompt-to-spec`.
+
+## O Que Nao Existe no MVP
+
+- SaaS, usuarios, times, billing ou cloud sync.
+- Banco de dados, vector database ou embeddings reais.
+- Publicacao npm real.
+- Instalador desktop.
+- Autenticacao.
+- Colaboracao em tempo real.
+- Sandbox avancado de sistema operacional.
+- Execucao autonoma de comandos sem acao explicita do usuario.
+
+Essas ausencias sao intencionais para manter o produto local, barato, auditavel e simples.
 
 ## Interface
 
-O frontend fica em `public/` e usa React via CDN. `index.html` e apenas o shell da pagina; a logica da UI fica em `app.js` e os estilos base ficam em `styles.css`. A tela principal contem:
+O frontend fica em `public/`:
 
-- um textarea unico para prompt, codigo ou contexto;
-- seletor de backend de IA;
-- checkbox de modo estrito;
-- botao `Gerar Spec`;
-- status de conexao com o backend;
-- painel de resultado JSON;
-- historico local em `localStorage`.
-
-Payload principal enviado ao backend:
-
-```json
-{
-  "prompt": "texto completo do usuario, incluindo codigo se houver",
-  "preferred_backend": "auto",
-  "strict_mode": false,
-  "user_id": "user_001",
-  "team_id": "team_001"
-}
+```text
+public/
+  index.html
+  app.js
+  styles.css
+  backend-config.json
 ```
 
-Valores aceitos para backend:
+A tela principal e um shell IDE com:
 
-- `auto`
-- `gemini`
-- `llama`
-- `ollama`
-- `deterministic_builder`
+- top bar com nome do projeto, sprint atual, status de pipeline e acoes principais;
+- sidebar esquerda com Pipeline, Sprints, MCP Tools e Agents;
+- area central com artefatos locais, editor/preview Markdown e painel principal;
+- painel inferior com terminal visual, logs e eventos;
+- sidebar direita com status de sprint, score, checklist e acoes rapidas;
+- area de memoria local para busca e registro de decisoes.
 
-## Exemplo de Uso
+O frontend consome a mesma origem quando servido pelo backend ou pelo container. Quando aberto em modo local antigo, usa `http://localhost:3000` como fallback.
 
-Cole tudo no campo unico:
+## Workspace Local
 
-```ts
-refatore esse codigo para melhorar a legibilidade
+`.mcp-task/` e a fonte operacional do MVP:
 
-function processarUsuarios(users: any[]) {
-  let resultado: any[] = [];
-  return resultado;
-}
+```text
+.mcp-task/
+  agents/
+  contracts/
+  docs/
+  evaluations/
+  logs/
+  memory/
+  progress/
+  qa/
+  specs/
+  sprints/
+  tools/
 ```
 
-Com esse input, o backend deve:
+Responsabilidades:
 
-- classificar como `code_refactor`;
-- detectar codigo inline;
-- criar um arquivo virtual como `inline_prompt_1.ts`;
-- preencher `inputs.code` com `code_source: "inline_prompt"`;
-- satisfazer o runtime gate;
-- injetar `CODE_CONTEXT` no prompt enviado ao provider;
-- gerar uma SPEC de refatoracao seguindo o template `code_refactor`.
-
-## Resposta Esperada
-
-A resposta segue o contrato `PromptSpecResponse`. Exemplo resumido:
-
-```json
-{
-  "status": "success",
-  "prompt_spec": {
-    "task_instruction": "Create a refactor plan...",
-    "input_fields": {},
-    "output_fields": {}
-  },
-  "quality_score": 9,
-  "quality_breakdown": {
-    "structural_quality": 9,
-    "semantic_precision": 8,
-    "intent_match": 8,
-    "template_fit": 8,
-    "provider_execution_quality": 8
-  },
-  "validation": {
-    "is_valid": true,
-    "issues": [],
-    "fixes_applied": []
-  },
-  "ai_backend": {
-    "provider": "gemini",
-    "model": "gemini-2.5-flash",
-    "fallback_used": false
-  },
-  "fallback": {
-    "used_fallback": false,
-    "fallback_type": "none"
-  }
-}
-```
-
-Para `code_refactor`, os outputs esperados incluem:
-
-- `refactor_plan`
-- `module_boundaries`
-- `compatibility_notes`
-- `tests`
-
-Para `code_analysis`, os outputs esperados incluem:
-
-- `strengths`
-- `good_practices`
-- `weaknesses`
-- `improvement_opportunities`
-- `maintainability_score`
-- `summary`
+- `specs/`: SPECs em Markdown.
+- `sprints/`: sprint plans e `roadmap.md`.
+- `contracts/`: contratos de sprint com escopo permitido e criterios de aceite.
+- `qa/`: resultados de QA por sprint.
+- `evaluations/`: avaliacoes e score final.
+- `progress/`: estado de agentes, pipeline e eventos.
+- `logs/`: terminal visual e registros operacionais.
+- `memory/`: memoria local e decisoes.
+- `tools/`: estado do harness de execucao explicita.
 
 ## API
 
-Endpoint principal:
+Endpoints principais:
 
 ```http
-POST http://localhost:3000/prompt-to-spec
-Content-Type: application/json
+GET  /health
+GET  /backend-config
+POST /prompt-to-spec
+GET  /workspace
+GET  /workspace/artifact?path=.mcp-task/specs/example.md
+POST /workspace/artifact
+POST /workspace/progress/event
+GET  /workspace/tool-harness
+POST /workspace/tool-harness/proposals/package-scripts
+POST /workspace/tool-harness/commands/approve
+POST /workspace/tool-harness/commands/execute
+GET  /workspace/memory
+POST /workspace/memory/search
+POST /workspace/memory/decisions
 ```
 
-Request minimo:
+### `POST /prompt-to-spec`
+
+Contrato principal do runtime semantico:
 
 ```json
 {
@@ -221,42 +151,13 @@ Request minimo:
 }
 ```
 
-Cenarios comuns de backend:
+Backends aceitos:
 
-```json
-{
-  "ai_backend": {
-    "provider": "gemini",
-    "model": "gemini-2.5-flash",
-    "fallback_used": false
-  }
-}
-```
-
-```json
-{
-  "ai_backend": {
-    "provider": "ollama",
-    "model": "llama3.2",
-    "fallback_used": false
-  }
-}
-```
-
-```json
-{
-  "ai_backend": {
-    "provider": "deterministic_builder",
-    "model": "template-compiler",
-    "fallback_used": true
-  },
-  "fallback": {
-    "used_fallback": true,
-    "fallback_type": "intent_specific",
-    "fallback_reason": "provider_timeout"
-  }
-}
-```
+- `auto`
+- `gemini`
+- `llama`
+- `ollama`
+- `deterministic_builder`
 
 Quando falta input obrigatorio, a API retorna erro deterministico:
 
@@ -270,63 +171,89 @@ Quando falta input obrigatorio, a API retorna erro deterministico:
 }
 ```
 
+### Rotas de Workspace
+
+As rotas `/workspace/*` operam arquivos dentro de `.mcp-task/`.
+
+Guardrails atuais:
+
+- caminhos absolutos e traversal (`..`) sao rejeitados;
+- leitura fica limitada aos artefatos suportados dentro de `.mcp-task/`;
+- escrita e permitida apenas para Markdown em:
+  - `.mcp-task/specs/`
+  - `.mcp-task/sprints/`
+  - `.mcp-task/contracts/`
+- sprint plan precisa referenciar uma SPEC Markdown;
+- Contract precisa conter campos obrigatorios antes de liberar Build.
+
+## Gerador de SPECs
+
+O runtime original continua disponivel e governado. Ele recebe prompt, codigo, JSON ou contexto e produz `PromptSpecResponse` validado.
+
+Fluxo resumido:
+
+```text
+prompt -> semantic classifier -> intent prioritization -> inline code hydration
+-> runtime input gate -> template registry -> code context resolver
+-> schema-aware prompt compiler -> provider router/fallback
+-> JSON stability engine -> schema authority guard -> response
+```
+
+Capacidades preservadas:
+
+- classificacao semantica e hierarquica de intents;
+- priorizacao entre `code_refactor`, `code_analysis`, `api_design`, `frontend_component`, `security_analysis` e outras intents;
+- runtime input gate;
+- hidratacao pre-gate com codigo inline;
+- extracao de snippets Markdown, TypeScript, JavaScript e JSON;
+- injecao de contexto real do workspace;
+- prompt compiler consciente de schema;
+- guardas contra override estrutural da LLM;
+- fallback deterministico por intent;
+- suite golden de regressao.
+
 ## Estrutura de Pastas
 
 ```text
-public/
-  index.html                  Shell HTML da interface web estatica
-  app.js                      Logica React da UI
-  styles.css                  Estilos base da pagina
-  backend-config.json          Arquivo gerado pelo backend com porta ativa
-
 src/
   index.ts                     Bootstrap do servidor
-  server/                      App Express, porta, backend config e startup
-  routes/                      Rotas /prompt-to-spec, /health, /metrics e config
+  server/                      App Express, portas, config e startup
+  routes/                      Rotas HTTP: prompt, health e workspace
   middleware/                  Handlers de erro e 404
-  runtime/                     Estado runtime compartilhado do servidor
-  services/
-    promptSpecService.ts       Orquestracao principal da geracao de SPEC
+  runtime/                     Estado runtime compartilhado
+  services/                    Orquestracao principal de SPECs
+  cli/                         CLI local mcp-task
+  core/
+    mvp/                       Readiness e regras do MVP
+  infra/
+    file-system/               Persistencia .mcp-task, memoria e artefatos
+    mcp/                       Harness de ferramentas e comandos locais
   ai/
-    classifier/                Catalogo, scoring, priorizacao e classificacao hierarquica
-    json/                      Sanitizacao, extracao, reparo e retry de JSON
+    classifier/                Catalogo, scoring e classificacao
+    json/                      Sanitizacao, extracao e reparo de JSON
     prompt/                    Schema-aware prompt compiler
-    providers/                 Startup probe, failover e execucao de providers
-    router/                    Classificador semantico e grafo de execucao
-  cache/
-    semantic/                  Cache semantico e politica de escrita segura
-    embeddings/                Embeddings locais e similaridade
-  learning/
-    history/                   Historico persistente e padroes aprendidos
-  context/
-    inlineCodeExtractor.ts     Extrai codigo colado no prompt
-    codeContextResolver.ts     Seleciona arquivos relevantes
-    dependencyScanner.ts       Mapeia imports e relacoes por nome
-    codePackBuilder.ts         Monta CODE_CONTEXT com limite de tokens
-    codeContextMerger.ts       Mescla arquivos reais e virtuais
-  governance/
-    providers/                 Estado, taxonomia e confiabilidade de providers
-    policies/                  Politicas de execucao
-    safety/                    Validacao de seguranca
-  spec/
-    templates/                 Registry, composicao e fallback seguro
-    contracts/                 Schema authority e validadores de contrato
-    governance/                Runtime gate, semantic governance e hydration
-    confidence/                Calculo de confianca
-    learning/                  Guardrails para aprendizagem
-    builder/                   Construcao deterministica de SPEC
-    planner/                   PlanDocument deterministico
-  schemas/
-    promptSpec.ts              Schemas Zod de request/response
-  observability/
-    logger.ts                  Logs estruturados
-    metrics.ts                 Metricas em memoria
-    tracing.ts                 Contexto de tracing
+    providers/                 Gemini/Ollama/failover
+    router/                    Classificador semantico
+  cache/                       Cache semantico e embeddings locais simples
+  context/                     Extracao e injecao de contexto de codigo
+  governance/                  Provider state, policies e safety
+  learning/                    Historico persistente
+  spec/                        Templates, contracts, builder e governance
+  schemas/                     Schemas Zod
+  observability/               Logs, metricas e tracing
   tests/
-    golden/goldenRunner.ts     Suite golden de regressao
+    golden/                    Suite golden de regressao
+
+public/
+  index.html                   Shell HTML
+  app.js                       UI IDE local
+  styles.css                   Estilos do shell
+  backend-config.json          Config gerada pelo backend
+
+.mcp-task/                     Workspace operacional local
 ```
 
-## Como Rodar
+## Como Rodar Localmente
 
 Instale dependencias:
 
@@ -334,13 +261,13 @@ Instale dependencias:
 npm install
 ```
 
-Crie o `.env`:
+Crie o `.env` a partir do exemplo:
 
 ```bash
 cp .env.example .env
 ```
 
-Inicie backend e frontend juntos:
+Inicie backend e frontend estatico juntos:
 
 ```bash
 npm run dev
@@ -349,26 +276,26 @@ npm run dev
 Por padrao:
 
 - backend: `http://localhost:3000`
-- frontend: `http://localhost:5173`
+- frontend estatico de dev: `http://localhost:5173`
 - health: `http://localhost:3000/health`
 - endpoint principal: `POST http://localhost:3000/prompt-to-spec`
 
-O backend escreve `public/backend-config.json` para o frontend descobrir a porta ativa.
+O backend tambem serve `public/` quando executado via `npm start` apos build.
 
 ## Como Rodar com Docker
 
-O container de producao sobe a API e a UI estatica no mesmo processo Express.
+O container de producao sobe API e UI estatica no mesmo processo Express.
 
 Build manual:
 
 ```bash
-docker build -t mcp-task .
+docker build -t mcp-task:local .
 ```
 
 Run manual:
 
 ```bash
-docker run --rm -p 3000:3000 --name mcp-task mcp-task
+docker run --rm -p 3000:3000 --name mcp-task mcp-task:local
 ```
 
 Com Docker Compose:
@@ -395,104 +322,44 @@ Depois acesse:
 - health: `http://localhost:3000/health`
 - endpoint principal: `POST http://localhost:3000/prompt-to-spec`
 
-Se voce usou `HOST_PORT=3010`, troque `3000` por `3010` nas URLs acima.
+Se voce usou `HOST_PORT=3010`, troque `3000` por `3010`.
 
-O `docker-compose.yml` monta estes arquivos locais dentro do container para preservar o comportamento offline-first:
+O Compose monta estes arquivos locais dentro do container:
 
 ```text
 ./.mcp-task -> /app/.mcp-task
 ./promptSpecHistory.json -> /app/promptSpecHistory.json
 ```
 
-Variaveis de ambiente podem ser passadas pelo shell antes de iniciar o Compose:
-
-```bash
-PREFERRED_BACKEND=deterministic_builder docker compose up --build
-```
-
-Para usar Gemini, defina `GEMINI_API_KEY` fora do repositorio. Para usar Ollama instalado no host, use `USE_OLLAMA=true` e mantenha `OLLAMA_HOST=http://host.docker.internal:11434`.
+Isso preserva o comportamento offline-first e evita banco de dados.
 
 ## CLI Local
 
-Depois do build, a CLI local fica disponivel em `dist/cli/mcp-task.js` e o pacote expoe o binario `mcp-task` para uso local futuro.
+Depois do build, a CLI fica em `dist/cli/mcp-task.js`.
 
-Comandos suportados:
+Comandos:
 
 ```bash
 npm run build
 node dist/cli/mcp-task.js status
 node dist/cli/mcp-task.js doctor
 node dist/cli/mcp-task.js --help
+node dist/cli/mcp-task.js --version
 ```
 
-`status` le `.mcp-task/` diretamente e mostra sprint atual, Contract, QA, Evaluation, Done gate, memoria local e comandos de ferramenta. Ele nao precisa do servidor HTTP.
-
-`doctor` valida pre-condicoes locais: runtime Node, `package.json`, metadata do pacote, scripts essenciais, `.mcp-task/` e roadmap.
-
-`start` reaproveita o servidor local existente:
+Atalho:
 
 ```bash
-node dist/cli/mcp-task.js start
+npm run cli
 ```
 
-Esta sprint prepara estrutura local de pacote. Nao ha publicacao npm, release automation, cloud sync ou instalador desktop.
+`status` le `.mcp-task/` diretamente e mostra sprint atual, Contract, QA, Evaluation, Done gate, memoria local e comandos de ferramenta.
 
-## MVP Local
+`doctor` valida pre-condicoes locais: Node, `package.json`, metadata do pacote, scripts essenciais, `.mcp-task/` e roadmap.
 
-O MVP local do MCP Harness Task Manager usa arquivos em `.mcp-task/` como fonte operacional. O fluxo principal suportado e:
-
-```text
-SPEC -> Contract -> Build -> QA -> Evaluation -> Done
-```
-
-Capacidades prontas no MVP:
-
-- shell visual estilo IDE para navegar artefatos locais;
-- leitura e edicao controlada de SPECs, sprint plans e Contracts;
-- gate de Contract antes de Build;
-- QA e Evaluation com score minimo para liberar Done;
-- execution harness com comandos propostos, aprovados e auditados;
-- memoria local e historico pesquisavel em Markdown/JSON;
-- CLI local `mcp-task` para `status`, `doctor`, `help` e `start`;
-- persistencia offline-first baseada em `.mcp-task/`.
-
-## Limitações do MVP
-
-O MVP nao inclui:
-
-- SaaS, usuarios, times, billing ou cloud sync;
-- banco de dados, vector database ou embeddings;
-- publicacao npm real;
-- instalador desktop;
-- execucao automatica de comandos;
-- colaboracao em tempo real;
-- sandbox avancado de sistema operacional.
-
-Essas ausencias sao deliberadas para manter o produto local, barato e auditavel.
-
-## Validação Local
-
-Antes de considerar o MVP saudavel, rode:
-
-```bash
-node --check public/app.js
-npm run build
-npm run test:golden
-node dist/cli/mcp-task.js status
-node dist/cli/mcp-task.js doctor
-node dist/cli/mcp-task.js --help
-```
-
-O readiness report do MVP fica em:
-
-```text
-.mcp-task/evaluations/sprint-010-mvp-readiness.json
-.mcp-task/docs/mvp-readiness.md
-```
+`start` hoje e um comando de orientacao da CLI. O servidor real ainda e iniciado por `npm start` ou `npm run dev`.
 
 ## Scripts Disponiveis
-
-Scripts reais do `package.json`:
 
 ```bash
 npm run backend          # tsx watch src/index.ts
@@ -508,7 +375,7 @@ npm run cli              # executa dist/cli/mcp-task.js apos build
 
 ## Variaveis de Ambiente
 
-Exemplo esperado:
+Exemplo:
 
 ```bash
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -530,13 +397,14 @@ PORT=3000
 Notas:
 
 - `GEMINI_API_KEY` e necessario para usar Gemini.
-- `GEMINI_MODEL` pode ser validado no startup e trocado por failover se estiver indisponivel.
-- `USE_OLLAMA=true` habilita Llama/Ollama local quando o Ollama estiver rodando.
-- Nunca coloque chaves reais no README ou em commits.
+- `USE_OLLAMA=true` habilita Ollama local quando o servidor Ollama estiver rodando.
+- Em Docker, `OLLAMA_HOST` padrao aponta para `http://host.docker.internal:11434`.
+- `PREFERRED_BACKEND=deterministic_builder` permite uso local sem provider externo.
+- Nunca commite `.env` ou chaves reais.
 
 ## Setup do Ollama
 
-Instale o Ollama pelo site oficial:
+Instale o Ollama:
 
 ```text
 https://ollama.ai/download
@@ -548,39 +416,64 @@ Baixe um modelo:
 ollama pull llama3.2
 ```
 
-Modelos uteis:
-
-- `llama3.2`: equilibrio entre velocidade e qualidade;
-- `mistral`: bom para tarefas gerais;
-- `codellama`: focado em codigo.
-
 Verifique modelos instalados:
 
 ```bash
 ollama list
 ```
 
-Se necessario, inicie o servidor local:
+Se necessario:
 
 ```bash
 ollama serve
 ```
 
-Troubleshooting rapido:
+Troubleshooting:
 
 - `model not found`: rode `ollama pull llama3.2`.
-- `connection refused`: confirme se `ollama serve` esta ativo e se `OLLAMA_HOST` aponta para `http://localhost:11434`.
-- performance lenta: teste um modelo menor ou feche processos pesados de CPU/GPU.
+- `connection refused`: confirme se `ollama serve` esta ativo.
+- Docker no Windows/Mac: use `OLLAMA_HOST=http://host.docker.internal:11434`.
+
+## Validacao
+
+Validacao local recomendada:
+
+```bash
+node --check public/app.js
+npm run build
+npm run test:golden
+node dist/cli/mcp-task.js status
+node dist/cli/mcp-task.js doctor
+node dist/cli/mcp-task.js --help
+```
+
+Validacao Docker:
+
+```bash
+docker build -t mcp-task:local .
+docker compose up -d --build
+```
+
+Se `3000` estiver ocupada:
+
+```powershell
+$env:HOST_PORT="3010"; docker compose up -d --build
+Invoke-WebRequest -UseBasicParsing -Uri http://localhost:3010/health
+```
+
+Validacoes ja executadas na SPRINT-011:
+
+- `npm.cmd run build` passou.
+- `node --check public/app.js` passou.
+- `npm.cmd run test:golden` passou.
+- `docker build -t mcp-task:local .` passou.
+- `docker compose up -d --build` passou com `HOST_PORT=3010`.
+- `GET http://localhost:3010/health` retornou `200`.
+- Container ficou `healthy`.
 
 ## Testes
 
-Rode a suite golden:
-
-```bash
-npm run test:golden
-```
-
-Ela cobre:
+A suite golden cobre:
 
 - classificacao de intents;
 - priorizacao de `code_refactor`;
@@ -593,17 +486,23 @@ Ela cobre:
 - input field inference guard;
 - code context resolver;
 - inline code extraction;
-- schema-aware prompt compiler.
+- schema-aware prompt compiler;
+- validadores de workspace `.mcp-task/`;
+- validadores de agentes, progresso, QA e Evaluation;
+- harness de comandos aprovados;
+- CLI e readiness do MVP.
 
-Valide tambem o build:
+Execute:
 
 ```bash
-npm run build
+npm run test:golden
 ```
 
 ## Observabilidade
 
-O backend usa logs estruturados JSON. Eventos importantes:
+O backend usa logs estruturados JSON.
+
+Eventos relevantes:
 
 - `provider_model_validated`
 - `provider_error_classified`
@@ -627,41 +526,34 @@ O backend usa logs estruturados JSON. Eventos importantes:
 - `schema_authority_enforced`
 - `fallback_template_selected`
 
-O endpoint `/health` retorna status do backend, providers, modelos e metricas em memoria.
+`GET /health` retorna status do backend, providers, modelos e metricas em memoria.
 
-## Decisoes de Arquitetura Consolidadas
+## Decisoes de Arquitetura
 
+- `.mcp-task/` e a persistencia operacional do workspace local.
+- Markdown e JSON sao preferidos para auditoria humana.
 - A IA gera conteudo, nao estrutura.
-- Template selection e schema definition sao responsabilidade exclusiva do sistema.
-- `strict_json` permanece ativo no fluxo governado.
-- Erros do usuario, como `missing_required_input`, nao penalizam reliability de provider.
-- Retry e bloqueado para erros deterministicos.
-- `deterministic_builder` e sempre o ultimo candidato seguro.
-- Fallback nunca deve defaultar para `api_design`, `database_design` ou `architecture_design`.
-- Codigo inline deve ser hidratado antes do runtime gate quando a intent exige `code`.
-- Campos de input definidos pelo template sao preservados.
-- Campos inferidos exigem sinal semantico forte, compatibilidade por intent e score minimo.
+- Template selection e schema definition pertencem ao sistema.
+- `deterministic_builder` e o fallback seguro.
+- O app deve funcionar sem banco de dados.
+- Tool execution deve ser explicita, aprovada e registrada.
+- Builder nao valida o proprio trabalho; QA e Evaluation sao gates separados.
+- Docker usa um unico container para API e UI estatica.
 
-## Status Atual
+## Riscos Conhecidos
 
-Status: runtime funcional em desenvolvimento local.
+- As rotas locais de workspace ainda nao possuem autenticacao.
+- `cors()` esta aberto para facilitar desenvolvimento local; antes de uso publico, restringir origem ou adicionar token local.
+- `GET /workspace` hoje pode materializar propostas de comandos no estado local; o ideal futuro e separar esse efeito em `POST`.
+- `.mcp-task/` pode crescer e exigir paginacao/indexacao incremental.
+- O CLI `start` ainda nao inicia o servidor de fato; ele apenas orienta o fluxo.
+- O `npm audit` reportou vulnerabilidades existentes em dependencias durante Docker build; tratar em uma sprint de manutencao separada.
 
-Validacoes esperadas antes de publicar ou abrir PR:
+## Proximos Passos Sugeridos
 
-```bash
-npm run build
-npm run test:golden
-```
-
-## Roadmap
-
-Proximos passos sugeridos, ainda nao implementados como capacidade completa:
-
-- analise AST-aware para TypeScript/JavaScript;
-- embeddings reais para ranking semantico de arquivos;
-- memoria de sessao entre requests;
-- contexto incremental por projeto;
-- metricas historicas por provider;
-- UI para visualizar trace, fallback reason e code context selecionado;
-- persistencia de metricas fora de memoria;
-- testes end-to-end com providers mockados.
+- Fechar o hardening de seguranca local: CORS restrito, token local e protecao das rotas de escrita/execucao.
+- Separar leitura e escrita de `/workspace`.
+- Atualizar `.mcp-task/memory/project.json` para apontar a sprint atual correta quando uma nova sprint passa.
+- Adicionar smoke tests de browser com Playwright.
+- Corrigir o gerador de novo Contract no frontend para nao reutilizar texto da sprint antiga.
+- Tratar vulnerabilidades de dependencia em uma sprint dedicada.
